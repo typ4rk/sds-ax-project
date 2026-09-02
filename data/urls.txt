@@ -1,0 +1,6 @@
+# 점검 대상 URL 목록 (한 줄에 하나)
+# 빈 줄과 '#'로 시작하는 줄은 무시한다.
+
+https://www.naver.com/
+https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
+

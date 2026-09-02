@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 비밀 값 (.env.example만 커밋한다)
+.env
+
+# 런타임 생성 데이터 (스캔 결과 DB — 원본 값이 그대로 저장되므로 커밋 금지)
+data/scan.db
+data/scan.db-journal
+data/scan.db-wal
+data/scan.db-shm
+
+# 에디터/OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
