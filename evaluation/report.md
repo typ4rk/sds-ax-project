@@ -37,15 +37,15 @@
 
 | 기능 | 설계 대응 | 케이스 | Pass | Fail | 미실행 |
 |---|---|---|---|---|---|
-| 1-x 수집 | `src/_browser.py`, `data/urls.txt` | 12 | 7 | 0 | 5 |
-| 2-x 탐지 | `src/_matcher.py`, `data/patterns.json` | 8 | 3 | 0 | 5 |
+| 1-x 수집 | `src/_browser.py`, `data/urls.txt` | 14 | 9 | 0 | 5 |
+| 2-x 탐지 | `src/_matcher.py`, `data/patterns.json` | 10 | 5 | 0 | 5 |
 | 3-x 매칭 기록 | `matches` 테이블 컬럼 구성 | 6 | 2 | 0 | 4 |
 | 4-x 저장 | `src/_storage.py` | 7 | 1 | 0 | 6 |
 | 5-x 조회 | `src/retriever.py`, `tools.query_matches()` | 11 | 3 | 0 | 8 |
 | 6-x 알림 | `src/_notify.py` | 6 | 3 | 0 | 3 |
-| **합계** | | **50** | **19** | **0** | **31** |
+| **합계** | | **54** | **23** | **0** | **31** |
 
-현재 통과율 **19/50 (38%)** — 출시 기준(90%) 미달. Fail은 아직 없고 전부 미실행이다.
+현재 통과율 **23/54 (43%)** — 출시 기준(90%) 미달. Fail은 아직 없고 전부 미실행이다.
 확인된 19건의 목록은 [verification.md](../verification.md) 「현재까지 확인된 항목」 참고.
 
 ## 3. 성공 기준 대비

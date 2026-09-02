@@ -5,9 +5,10 @@
     { "name": "test-any-url", "regex": "https://[a-z.]+naver\\.com" }
   ],
   "targets": {
-    "network": { "headers": true, "body": true, "cookies": true },
+    "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },
     "console": true
   },
+  "filters": { "methods": ["POST"] },
   "delayMs": 500,
   "browser": { "chromePath": null }
 }

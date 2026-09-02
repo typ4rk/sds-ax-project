@@ -22,7 +22,7 @@ def run_scan() -> dict:
     내부적으로 다음을 고정 순서로 실행한다:
     1) data/patterns.json 로드 및 검증
     2) data/urls.txt의 각 URL을 순서대로 방문 (실패한 URL은 건너뛰고 계속)
-    3) 방문마다 네트워크/콘솔 데이터를 수집하고 정규식으로 매칭
+    3) 방문마다 네트워크/콘솔 데이터를 수집하고, filters를 통과한 것만 정규식으로 매칭
     4) 매칭 발생 즉시 콘솔에 출력
     5) scans/matches를 data/scan.db에 저장
 
@@ -32,6 +32,7 @@ def run_scan() -> dict:
     config = _load_config()
     patterns = _matcher.compile_patterns(config.get("patterns", []))
     targets = config.get("targets") or {}
+    methods = _method_filter(config.get("filters") or {})
     delay_ms = int(config.get("delayMs") or 0)
     chrome_path = (config.get("browser") or {}).get("chromePath")
 
@@ -50,11 +51,17 @@ def run_scan() -> dict:
                 # visit은 반환값이 없고 emit 콜백으로만 수집 결과를 넘긴다.
                 # 이 URL에서 덩어리/매칭이 각각 몇 건이었는지 세어 방문 끝에 알린다.
                 chunks = 0
+                filtered = 0
                 hits = 0
 
                 def emit(location: str, text: str, source_url: str, detail: dict) -> None:
-                    nonlocal chunks, hits
+                    nonlocal chunks, filtered, hits
                     chunks += 1
+                    if methods is not None and detail.get("method") not in methods:
+                        # filters.methods에 걸리지 않은 덩어리는 매칭 대상에서 뺀다.
+                        # method가 없는 수집 항목(응답 헤더/바디/쿠키/콘솔)도 여기서 제외된다.
+                        filtered += 1
+                        return
                     found = _matcher.scan_text(patterns, text, location, source_url, detail)
                     hits += len(found)
                     # 수집 원본을 먼저 보여준다 (SCAN_TRACE=1일 때만).
@@ -73,7 +80,7 @@ def run_scan() -> dict:
                     _notify.notify_skip(url, reason)
                     skipped.append({"url": url, "reason": reason})
                     continue
-                _notify.notify_visit(url, chunks, hits)
+                _notify.notify_visit(url, chunks, hits, filtered)
                 visited += 1
     finally:
         # 도중에 예외가 나더라도 scans 행을 running 상태로 남기지 않는다.
@@ -92,6 +99,7 @@ def run_scan() -> dict:
         "matches_total": sum(by_pattern.values()),
         "matches_by_pattern": dict(by_pattern),
         "matches_by_location": dict(by_location),
+        "method_filter": sorted(methods) if methods is not None else None,
         "skipped": skipped,
     }
 
@@ -141,14 +149,35 @@ def _check_targets(targets: dict) -> None:
         (
             network.get("headers"),
             network.get("body"),
+            network.get("requestBody"),
             network.get("cookies"),
             targets.get("console"),
         )
     ):
         raise ValueError(
-            "targets에 켜진 수집 대상이 없습니다"
-            f" (network.headers/body/cookies, console 중 최소 1개 필요): {PATTERNS_PATH}"
+            "targets에 켜진 수집 대상이 없습니다 (network.headers/body/requestBody/cookies,"
+            f" console 중 최소 1개 필요): {PATTERNS_PATH}"
         )
+
+
+def _method_filter(filters: dict) -> set[str] | None:
+    """filters.methods를 대문자 집합으로 돌려준다. 지정이 없으면 None(필터 없음).
+
+    None이면 수집된 모든 항목을 매칭한다. 집합이면 detail.method가 그 안에 있는 항목만
+    매칭하므로, method가 없는 수집 항목(응답 헤더/바디/쿠키/콘솔)은 함께 제외된다.
+    """
+    raw = filters.get("methods")
+    if raw is None:
+        return None
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ValueError(f"filters.methods는 문자열 배열이어야 합니다: {raw!r}")
+    methods = {str(item).strip().upper() for item in raw if str(item).strip()}
+    if not methods:
+        raise ValueError(
+            "filters.methods가 비어 있습니다. 필터를 쓰지 않으려면 키를 지우세요:"
+            f" {PATTERNS_PATH}"
+        )
+    return methods
 
 
 def _check_delay(delay_ms) -> None:

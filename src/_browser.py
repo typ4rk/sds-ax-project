@@ -43,6 +43,7 @@ def visit(browser: Browser, url: str, targets: dict, delay_ms: int, emit: Emit) 
     network = targets.get("network") or {}
     want_headers = bool(network.get("headers"))
     want_body = bool(network.get("body"))
+    want_request_body = bool(network.get("requestBody"))
     want_cookies = bool(network.get("cookies"))
     want_console = bool(targets.get("console"))
 
@@ -55,7 +56,7 @@ def visit(browser: Browser, url: str, targets: dict, delay_ms: int, emit: Emit) 
 
     # 핸들러는 반드시 람다/함수로 넘긴다. list.append 같은 내장 메서드를 그대로 주면
     # Playwright가 핸들러에 속성을 붙이려다 AttributeError로 실패한다.
-    if want_headers:
+    if want_headers or want_request_body:
         page.on("request", lambda request: requests.append(request))
     if want_headers or want_body:
         page.on("response", lambda response: responses.append(response))
@@ -91,6 +92,22 @@ def visit(browser: Browser, url: str, targets: dict, delay_ms: int, emit: Emit) 
                         headers,
                         response.url,
                         {"page_url": url, "direction": "response", "status": response.status},
+                    )
+
+        if want_request_body:
+            # 브라우저가 내보낸 요청 페이로드. 응답 바디(body)와 달리 "나가는 데이터"다.
+            for request in requests:
+                payload = _safe_post_data(request)
+                if payload:
+                    emit(
+                        "request_body",
+                        payload,
+                        request.url,
+                        {
+                            "page_url": url,
+                            "direction": "request",
+                            "method": request.method,
+                        },
                     )
 
         if want_body:
@@ -141,3 +158,14 @@ def _safe_body(response) -> str:
     except Exception:
         return ""
     return raw.decode("utf-8", errors="replace")
+
+
+def _safe_post_data(request) -> str:
+    """요청 페이로드(POST 본문)를 텍스트로 읽는다. 없거나 읽을 수 없으면 빈 문자열.
+
+    GET처럼 본문이 없는 요청은 None이 오므로 빈 문자열로 바꿔 돌려준다.
+    """
+    try:
+        return request.post_data or ""
+    except Exception:
+        return ""

@@ -25,9 +25,9 @@ def notify_match(match: dict) -> None:
     url은 매칭된 값이 아니라 값이 발견된 리소스 URL이다(verification.md 3-2).
     """
     print(
-        f"[MATCH] pattern={match['pattern_name']}"
-        f"|matched_value={_one_line(match['matched_value'])}"
+        f"[MATCH] pattern={match['pattern_name']}"        
         f"|location={match['location']}"
+        f"|matched_value={_one_line(match['matched_value'])}"
         f"|url={match['url']}"        
         f"|detail={_clip(match.get('detail') or {}, DETAIL_CHARS)}",
         flush=True,
@@ -81,15 +81,19 @@ def notify_collected(
     print(f"       {_clip(text, PREVIEW_CHARS)}", file=sys.stderr, flush=True)
 
 
-def notify_visit(url: str, chunk_count: int, match_count: int) -> None:
-    """URL 1건 방문이 끝났을 때 수집 덩어리와 매칭이 각각 몇 건이었는지 알린다.
+def notify_visit(
+    url: str, chunk_count: int, match_count: int, filtered_count: int = 0
+) -> None:
+    """URL 1건 방문이 끝났을 때 수집·필터·매칭 건수를 알린다.
 
-    덩어리가 0건이면 수집 단계에서, 덩어리는 있는데 매칭이 0건이면 패턴에서 막힌 것이다.
+    어느 단계에서 0이 되었는지로 원인을 좁힌다:
+    덩어리 0건이면 수집 단계, 필터로 전부 빠졌으면 filters 설정, 그 다음이 패턴 문제다.
     """
     if not trace_enabled():
         return
     print(
-        f"[VISIT] {url} - 수집 덩어리 {chunk_count}건, 매칭 {match_count}건",
+        f"[VISIT] {url} - 수집 덩어리 {chunk_count}건,"
+        f" 필터 제외 {filtered_count}건, 매칭 {match_count}건",
         file=sys.stderr,
         flush=True,
     )

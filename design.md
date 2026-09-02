@@ -62,16 +62,37 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
     { "name": "custom-secret", "regex": "sk_live_[A-Za-z0-9]{24,}" }
   ],
   "targets": {
-    "network": { "headers": true, "body": true, "cookies": true },
+    "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },
     "console": true
   },
+  "filters": { "methods": ["POST"] },
   "delayMs": 500,
   "browser": { "chromePath": null }
 }
 ```
 
+수집 대상(`targets.network`):
+
+| 키 | 수집 항목 | location |
+|---|---|---|
+| `headers` | 요청·응답 헤더 | `header` |
+| `body` | **응답** 바디 (들어오는 데이터) | `body` |
+| `requestBody` | **요청** 페이로드 = POST 본문 (나가는 데이터) | `request_body` |
+| `cookies` | 컨텍스트 쿠키 | `cookie` |
+
+`targets.console`은 콘솔 로그·JS 에러를 `console` 위치로 수집한다.
+
+`filters.methods` (선택):
+- 지정하면 `detail.method`가 그 목록에 있는 수집 항목만 매칭한다. 대소문자는 무시한다
+- `method`는 **요청** 항목(요청 헤더, 요청 페이로드)에만 붙으므로, 필터를 켜면
+  응답 헤더·응답 바디·쿠키·콘솔은 함께 제외된다. "나가는 데이터만 검사"할 때 쓴다
+- 키를 지우면 필터 없이 수집된 전부를 매칭한다 (기본)
+
 검증 규칙:
 - `patterns[].name` 중복 불가, `regex`는 로드 시 `re.compile(...)`로 컴파일 검증 (실패 시 이름과 함께 에러)
+- `targets`에 켜진 수집 대상이 하나도 없으면 스캔 시작 전에 실패한다
+- `filters.methods`는 문자열 배열이어야 하며, 빈 배열이면 실패한다 (필터를 쓰지 않으려면 키를 지운다)
+- `delayMs`는 0 이상의 숫자여야 한다
 - `browser.chromePath`가 `null`이면 Playwright 관리 Chromium 사용, 문자열이면 그 경로를 `executable_path`로 사용
 
 ## 4. SQLite 스키마 (`src/_storage.py`가 관리)
@@ -92,7 +113,7 @@ CREATE TABLE IF NOT EXISTS matches (
   scan_id       INTEGER NOT NULL REFERENCES scans(id),
   pattern_name  TEXT NOT NULL,
   matched_value TEXT NOT NULL,
-  location      TEXT NOT NULL,   -- header | body | cookie | console
+  location      TEXT NOT NULL,   -- header | body | request_body | cookie | console
   url           TEXT NOT NULL,
   detail_json   TEXT,
   matched_at    TEXT NOT NULL
@@ -134,12 +155,12 @@ def run_scan() -> dict:
     내부적으로 다음을 고정 순서로 실행한다:
     1) data/patterns.json 로드 및 검증
     2) data/urls.txt의 각 URL을 순서대로 방문 (실패한 URL은 건너뛰고 계속)
-    3) 방문마다 네트워크/콘솔 데이터를 수집하고 정규식으로 매칭
+    3) 방문마다 네트워크/콘솔 데이터를 수집하고, filters를 통과한 것만 정규식으로 매칭
     4) 매칭 발생 즉시 콘솔에 출력
     5) scans/matches를 data/scan.db에 저장
 
     반환값은 에이전트가 요약에 쓸 수 있는 구조화된 결과(dict)이며,
-    scan_id, urls_total, urls_visited, status, 매칭 건수 요약을 포함한다.
+    scan_id, urls_total, urls_visited, status, 매칭 건수 요약, method_filter를 포함한다.
     """
 
 
@@ -272,7 +293,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 | verification.md 항목 | 설계 대응 |
 |---|---|
 | 1-x 수집 | `src/_browser.py`, `data/urls.txt`, `tools.run_scan()` |
-| 2-x 탐지 | `src/_matcher.py`, `data/patterns.json` |
+| 2-x 탐지 | `src/_matcher.py`, `data/patterns.json`(`patterns`, `filters.methods`) |
 | 3-x 매칭 기록 | `matches` 테이블 컬럼 구성 |
 | 4-x 저장 | `src/_storage.py`, `scans`/`matches` 스키마 |
 | 5-x 조회 | `src/retriever.py`(`find_matches`), `tools.query_matches()` |
