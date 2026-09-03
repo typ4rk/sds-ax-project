@@ -146,22 +146,26 @@ def find_context_texts(scan_id: int | None = None, limit: int = 2000) -> list[st
     return sorted(texts)
 
 
-def find_collected(limit: int = 5000) -> list[dict]:
+def find_collected(limit: int = 5000, with_body: bool = False) -> list[dict]:
     """collect 테이블에 저장된 요청 트래픽을 저장 순서대로 돌려준다.
 
     collect_traffic이 모아 둔 원본 요청이며, urls.txt 없이 탐지할 때 입력이 된다.
     headers_json 컬럼은 dict로 파싱해 headers 키로 바꿔 넘긴다(파싱 실패 시 빈 dict).
     호출하는 쪽은 headers_json이 아니라 headers를 봐야 한다.
 
+    with_body=True면 본문이 있는 행만 SQL 단계에서 걸러 온다. 본문 있는 행은 전체의
+    일부이므로(대부분 GET), 파이썬에서 걸러내면 limit이 먼저 잘려 본문 행을 놓친다.
+
     반환 항목: {"id", "url", "method", "headers", "body", "time"}
     """
+    sql = "SELECT id, url, method, headers_json, body, time FROM collect"
+    if with_body:
+        sql += " WHERE body IS NOT NULL AND body <> ''"
+    sql += " ORDER BY id LIMIT ?"
+
     conn = _storage.connect()
     try:
-        rows = conn.execute(
-            "SELECT id, url, method, headers_json, body, time"
-            " FROM collect ORDER BY id LIMIT ?",
-            (max(1, int(limit)),),
-        ).fetchall()
+        rows = conn.execute(sql, (max(1, int(limit)),)).fetchall()
     finally:
         conn.close()
 

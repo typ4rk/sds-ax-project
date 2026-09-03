@@ -272,6 +272,82 @@ def suggest_patterns(
     scan_id: int | None = None,
     min_cluster: int = 3,
     limit: int = 1000,
+    source: str = "matches",
+) -> dict:
+    """정규식 후보를 제안한다. 분석 대상은 source로 고른다.
+
+    - source="matches"(기본): 이미 패턴에 걸린 값들을 분석해 더 좁은 후보를 만든다.
+    - source="collect": collect 테이블의 요청 본문(body)을 분석해 새 후보를 만든다.
+      아직 어떤 패턴에도 안 걸린 값에서 패턴을 찾을 때 쓴다.
+
+    data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
+    """
+    if source == "collect":
+        return _suggest_from_collect(min_cluster, limit)
+    if source != "matches":
+        raise ValueError(f"source는 'matches' 또는 'collect'여야 합니다: {source!r}")
+    return _suggest_from_matches(pattern_name, scan_id, min_cluster, limit)
+
+
+def _suggest_from_collect(min_cluster: int, limit: int) -> dict:
+    """collect 테이블의 요청 본문에서 새 정규식 후보를 도출한다.
+
+    본문을 통째로 귀납에 넣으면 의미 있는 정규식이 나오지 않으므로, JSON 본문의
+    같은 키끼리 값을 모아(예: 여러 요청의 bizCd) 키별로 귀납한다. 서로 다른 값이
+    min_cluster 미만인 키는 과적합하므로 건너뛴다.
+
+    matches 경로와 달리 기준이 될 기존 정규식이 없어 회귀(lost) 판정을 할 수 없다.
+    그래서 채택 게이트는 컴파일 가능·ReDoS 없음·커버리지만 본다.
+    """
+    rows = retriever.find_collected(limit, with_body=True)
+    if not rows:
+        raise ValueError(
+            "collect 테이블에 body가 있는 행이 없습니다."
+            " collect_traffic으로 POST 트래픽을 먼저 수집하세요."
+        )
+
+    buckets = _induce.values_by_key([row["body"] for row in rows])
+    candidates = []
+    skipped_keys = []
+    for key, values in sorted(buckets.items()):
+        if len(values) < min_cluster:
+            skipped_keys.append(key)
+            continue
+        for cand in _induce.induce_regex(values, min_cluster=min_cluster):
+            score = _induce.evaluate_candidate(cand["regex"], values)
+            if not score["compiles"] or score["redos_risk"]:
+                continue
+            candidates.append(
+                {
+                    "json_key": key,
+                    "variant": cand["variant"],
+                    "regex": cand["regex"],
+                    "support": cand["support"],
+                    "coverage": score["coverage"],
+                    "tightness": cand["tightness"],
+                    "samples": cand["samples"],
+                }
+            )
+    candidates.sort(key=lambda c: (-c["support"], c["tightness"], len(c["regex"])))
+
+    return {
+        "source": "collect",
+        "bodies_analyzed": len(rows),
+        "json_keys_found": len(buckets),
+        "keys_too_few_values": len(skipped_keys),
+        "candidates": candidates[:MAX_CANDIDATES * 4],
+        "note": (
+            "collect 테이블의 요청 본문에서 JSON 키별로 도출한 후보입니다."
+            " 기존 패턴이 없어 회귀 판정은 하지 않았으며, patterns.json은 변경되지 않았습니다."
+        ),
+    }
+
+
+def _suggest_from_matches(
+    pattern_name: str | None,
+    scan_id: int | None,
+    min_cluster: int,
+    limit: int,
 ) -> dict:
     """저장된 매칭 값의 문자 구조를 분석해 더 정확한 정규식 후보를 제안한다.
 
@@ -331,9 +407,14 @@ def suggest_patterns(
         report.append(entry)
 
     return {
+        "source": "matches",
         "patterns": report,
         "corpus_size": len(corpus),
-        "note": "제안만 반환하며 data/patterns.json은 변경되지 않았습니다.",
+        "note": (
+            "matches 테이블(이미 패턴에 걸린 값)을 분석한 결과입니다."
+            " corpus_size는 검증에 쓴 부수 텍스트 수이며 collect 테이블과 무관합니다."
+            " 제안만 반환하며 data/patterns.json은 변경되지 않았습니다."
+        ),
     }
 
 

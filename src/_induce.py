@@ -7,6 +7,7 @@ DB·파일·네트워크에 접근하지 않는 순수 함수만 두므로 오�
 앵커인데, 이는 텍스트 임베딩이 인코딩하지 못하는 구조적 정보이기 때문이다.
 """
 
+import json
 import math
 import os
 import re
@@ -88,6 +89,35 @@ def cluster_by_shape(values: list[str]) -> dict[str, list[str]]:
     for value in sorted(set(v for v in values if v)):
         clusters[collapse_repeats(shape_signature(value, coarse=True))].append(value)
     return dict(clusters)
+
+
+def values_by_key(texts: list[str]) -> dict[str, list[str]]:
+    """JSON 본문 여러 건에서 같은 키의 값끼리 모아 돌려준다.
+
+    본문 하나를 통째로 귀납에 넣으면 의미 있는 정규식이 나오지 않는다. 반면 같은 키의
+    값들(예: 여러 요청의 bizCd)은 같은 형식일 가능성이 높아 귀납 입력으로 적합하다.
+    중첩된 dict·list를 따라 내려가며 잎 값만 모으고, 값은 중복을 제거한다.
+
+    JSON이 아닌 본문은 건너뛴다 — 형식을 알 수 없는 텍스트에서 키를 나눌 수 없다.
+    """
+    buckets: dict[str, set[str]] = defaultdict(set)
+
+    def walk(node, key: str | None) -> None:
+        if isinstance(node, dict):
+            for name, value in node.items():
+                walk(value, name)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value, key)
+        elif node is not None and key:
+            buckets[key].add(str(node))
+
+    for text in texts:
+        try:
+            walk(json.loads(text), None)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return {key: sorted(values) for key, values in buckets.items()}
 
 
 def induce_regex(values: list[str], min_cluster: int = MIN_CLUSTER) -> list[dict]:
@@ -183,7 +213,7 @@ def _repeating_body(mids: list[str], separator: str) -> dict[str, str]:
     high = max(len(s) for s in segment_lists)
     unit = f"(?:{klass}+{re.escape(separator)})"
     return {
-        "strict": f"{unit}{{{low},{high}}}",
+        "strict": f"{unit}{_repeat_spec(low, high)}",
         "open": f"{unit}+",
         "bounded": f"{unit}+",
     }
@@ -199,10 +229,15 @@ def _blob_body(mids: list[str]) -> dict[str, str]:
     if low == 0:
         return {}
     return {
-        "strict": f"{klass}{{{low},{high}}}",
+        "strict": f"{klass}{_repeat_spec(low, high)}",
         "open": f"{klass}{{{low},}}",
         "bounded": f"{klass}{{{low},}}",
     }
+
+
+def _repeat_spec(low: int, high: int) -> str:
+    """반복 횟수를 정규식 수량자로 적는다. 하한과 상한이 같으면 {n,n} 대신 {n}으로 쓴다."""
+    return f"{{{low}}}" if low == high else f"{{{low},{high}}}"
 
 
 def _char_class(chars: set[str]) -> str:
