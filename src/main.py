@@ -84,6 +84,6 @@ def _text_of(message) -> str:
 
 
 if __name__ == "__main__":
-    # python -m src.main "urls.txt 사이트들 점검하고 수집된 데이터 출력해줘" 
+    # python -m src.main "수집된 트래픽 본문에서 정규식 후보 찾아줘"
     # python -c "from src import retriever; [print(r['matched_value'], '<-', r['url']) for r in retriever.find_matches(pattern_name='test-any-url', limit=20)]"
     raise SystemExit(main(sys.argv[1:]))

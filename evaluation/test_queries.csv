@@ -1,7 +1,7 @@
 id,question,expected_tool,expected_pattern,notes
-1,"urls.txt 사이트들 점검해서 토큰 유출 있는지 확인해줘",run_scan,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
+1,"수집된 트래픽에서 토큰 유출 있는지 확인해줘",run_scan,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
 2,"최근 jwt-token 매칭 결과 보여줘",query_matches,jwt-token,"재스캔 없이 query_matches만 호출해야 함"
-3,"지금 바로 전체 사이트 다시 스캔해줘",run_scan,,"새 점검 요청이므로 run_scan을 호출해야 함"
+3,"지금 바로 다시 검사해줘",run_scan,,"재검사 요청이므로 run_scan을 호출해야 함"
 4,"naver.com 에서 나온 매칭만 골라서 보여줘",query_matches,,"url_substring=naver.com 조건으로 조회해야 함"
 5,"scan_id 1 결과 요약해줘",query_matches,,"scan_id 조건으로 조회하고 재스캔하지 않아야 함"
 6,"custom-secret 패턴이 걸린 적 있어?",query_matches,custom-secret,"pattern_name 조건으로 조회해야 함"

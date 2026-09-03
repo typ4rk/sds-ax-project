@@ -32,7 +32,6 @@ my-pjt/
 │   ├── _storage.py              # (내부) SQLite 연결/저장
 │   └── _notify.py               # (내부) 매칭 즉시 출력, 추적 출력, 수집 종료 대기
 ├── data/                        # 사용한 문서와 데이터
-│   ├── urls.txt                 # 점검 대상 URL 목록 (한 줄에 하나)
 │   ├── patterns.json            # 정규식 패턴 + 실행 설정
 │   └── scan.db                  # SQLite 저장소 (scans/matches/collect, gitignore 대상)
 └── evaluation/
@@ -40,19 +39,23 @@ my-pjt/
     └── report.md                # 평가 리포트
 ```
 
-## 2. `data/urls.txt` — 점검 대상
+## 2. 수집과 탐지의 분리
+
+점검 대상 URL 목록 파일은 쓰지 않는다. 대신 두 단계로 나눈다.
 
 ```
-# 점검 대상 URL 목록 (한 줄에 하나)
-# 빈 줄과 '#'로 시작하는 줄은 무시한다.
-
-https://www.naver.com/
-https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
+collect_traffic   창을 띄워 사람이 직접 둘러본다 → 오간 데이터를 collect 테이블에 저장
+     │
+run_scan          collect 테이블을 대상으로 정규식 탐지 (브라우저 없이, 몇 번이든)
 ```
 
-- 한 줄에 URL 하나. 빈 줄/`#`로 시작하는 줄은 무시
-- `tools.run_scan()`이 이 파일을 순서대로 읽어 방문(trace)한다 (도메인 크롤링 없음)
-- 개별 URL 방문 실패 시 해당 URL만 건너뛰고 다음 URL 계속 진행
+- 사람이 직접 이동하므로 **로그인해야 보이는 페이지도 수집된다.** 목록 파일 방식으로는
+  세션이 없어 접근할 수 없던 부분이다
+- 탐지가 저장된 데이터를 보므로 **브라우저·네트워크 없이 반복 실행**할 수 있다.
+  패턴을 고쳐 다시 검사할 때 사이트를 또 방문하지 않는다
+- 같은 수집 데이터에 같은 `patterns.json`을 적용하면 결과가 항상 같다 (재현성)
+
+대신 **수집 시점 이후의 변화는 보지 못한다.** 사이트가 바뀐 뒤를 보려면 다시 수집해야 한다.
 
 ## 3. `data/patterns.json` — 설정
 
@@ -67,7 +70,6 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
     "console": true
   },
   "filters": { "methods": ["POST"] },
-  "delayMs": 500,
   "browser": { "chromePath": null }
 }
 ```
@@ -96,7 +98,6 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
 - `targets`에 켜진 수집 대상이 하나도 없으면 스캔 시작 전에 실패한다
 - `filters.methods`는 문자열 배열이어야 한다. 문자열이나 숫자를 그대로 넣으면 실패한다
   (오타를 조용히 넘기면 필터가 통째로 무력화되기 때문). 빈 배열은 "제한 없음"으로 읽는다
-- `delayMs`는 0 이상의 숫자여야 한다
 - `browser.chromePath`가 `null`이면 Playwright 관리 Chromium 사용, 문자열이면 그 경로를 `executable_path`로 사용
 
 ## 4. SQLite 스키마 (`src/_storage.py`가 관리)
@@ -104,11 +105,11 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
 ```sql
 CREATE TABLE IF NOT EXISTS scans (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  source        TEXT NOT NULL,   -- 'data\urls.txt' | 'data/scan.db#collect'
+  source        TEXT NOT NULL,   -- 'data/scan.db#collect'
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
-  urls_total    INTEGER NOT NULL,
-  urls_visited  INTEGER NOT NULL DEFAULT 0,
+  chunks_total   INTEGER NOT NULL,
+  chunks_scanned INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'running'  -- running | completed | failed
 );
 
@@ -126,10 +127,10 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE TABLE IF NOT EXISTS collect (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   url           TEXT NOT NULL,
-  method        TEXT NOT NULL,
-  headers_json  TEXT,            -- 요청 헤더 dict를 JSON 문자열로
-  body          TEXT,            -- 요청 페이로드. 본문 없는 요청(GET 등)은 NULL
-  time          TEXT NOT NULL
+  location      TEXT NOT NULL,   -- header | body | request_body | cookie | console
+  content       TEXT NOT NULL,   -- 그 위치에서 수집한 텍스트 원본
+  detail_json   TEXT,            -- direction/method/status/kind 등 부가정보
+  collected_at  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_scan_id      ON matches(scan_id);
@@ -138,12 +139,16 @@ CREATE INDEX IF NOT EXISTS idx_matches_url          ON matches(url);
 CREATE INDEX IF NOT EXISTS idx_matches_matched_at   ON matches(matched_at);
 
 CREATE INDEX IF NOT EXISTS idx_collect_url          ON collect(url);
-CREATE INDEX IF NOT EXISTS idx_collect_time         ON collect(time);
+CREATE INDEX IF NOT EXISTS idx_collect_location     ON collect(location);
+CREATE INDEX IF NOT EXISTS idx_collect_collected_at ON collect(collected_at);
 ```
 
-`collect`는 `collect_traffic`이 모아 둔 **정규식을 거치지 않은 원본 요청**이다.
-`matches`가 "패턴에 걸린 것"이라면 `collect`는 "오간 것 전부"이므로, 쿠키·
-`Authorization` 헤더·POST 본문의 자격증명이 그대로 담긴다 — `matches`보다 민감하다.
+`collect`는 `collect_traffic`이 모아 둔 **정규식을 거치지 않은 원본**이다. 컬럼 구성이
+`_browser`의 `emit(위치, 텍스트, URL, 부가정보)`과 같은 모양이라, 수집 경로와 저장 형식이
+어긋날 수 없고 `run_scan`이 그대로 되돌려 검사한다. `location`은 `matches`와 같은 어휘를 쓴다.
+
+`matches`가 "패턴에 걸린 것"이라면 `collect`는 "오간 것 전부"이므로, 쿠키·`Authorization`
+헤더·POST 본문의 자격증명이 그대로 담긴다 — **`matches`보다 민감하다.**
 
 **주의:** `CREATE TABLE IF NOT EXISTS`는 이미 있는 테이블의 컬럼을 바꾸지 않는다.
 스키마를 고쳐도 기존 `scan.db`에는 반영되지 않아 실행 시점에 `OperationalError`로
@@ -174,14 +179,14 @@ def find_matches(
 | `find_matches(...)` | 조건별 매칭 조회. `tools.query_matches()`가 그대로 감싼다 |
 | `find_distinct_values(...)` | 중복 없는 `matched_value` + 빈도. 정규식 귀납의 양성 표본 |
 | `find_context_texts(...)` | 정규식이 적용된 적 없는 부수 텍스트(url, detail). 후보 검증 코퍼스 |
-| `find_collected(limit, with_body)` | `collect` 테이블의 원본 요청. `urls.txt` 없이 탐지할 때의 입력 |
+| `find_collected(limit, location)` | `collect` 테이블의 원본 관측 데이터. `run_scan`의 탐지 대상 |
 
-`find_collected`는 `headers_json` 컬럼을 dict로 파싱해 **`headers` 키로 바꿔** 넘긴다.
-호출하는 쪽은 `headers_json`이 아니라 `headers`를 봐야 한다 (컬럼명과 반환 키가 다르다).
+`find_collected`는 `detail_json` 컬럼을 dict로 파싱해 **`detail` 키로 바꿔** 넘긴다
+(컬럼명과 반환 키가 다르다).
 
-`with_body=True`면 본문 있는 행만 **SQL 단계에서** 걸러 온다. 본문 있는 행은 전체의
-일부(대부분 GET)이므로, 파이썬에서 걸러내면 `limit`이 먼저 잘려 본문 행을 놓친다 —
-실제로 본문 14건 중 6건만 분석되던 버그의 원인이었다.
+`location`을 주면 그 위치만 **SQL 단계에서** 걸러 온다. 특정 위치(예: `request_body`)는
+전체의 일부이므로, 파이썬에서 걸러내면 `limit`이 먼저 잘려 원하는 행을 놓친다 —
+실제로 요청 본문 14건 중 6건만 분석되던 버그의 원인이었다.
 
 - 이 파일은 순수 조회 로직만 담당 (상태 변경 없음)
 
@@ -189,31 +194,33 @@ def find_matches(
 
 ```python
 def run_scan() -> dict:
-    """등록된 정규식 패턴을 탐지한다. 대상은 data/urls.txt 유무로 갈린다.
+    """collect 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
-    - urls.txt가 있으면: 그 URL을 순서대로 브라우저로 방문하며 탐지한다(기존 동작).
-    - urls.txt가 없으면: collect_traffic이 scan.db의 collect 테이블에 모아 둔
-      요청 트래픽을 대상으로 탐지한다. 브라우저를 띄우지 않으므로 네트워크가 필요 없고,
-      로그인해야 보이던 페이지의 트래픽도 수집 당시 상태 그대로 검사된다.
+    collect_traffic이 수집해 둔 원본 관측 데이터를 대상으로 하므로 브라우저를 띄우지
+    않고 네트워크도 쓰지 않는다. 수집 당시의 상태(로그인 후 페이지 포함)가 그대로
+    검사되고, 같은 데이터로 몇 번 돌려도 결과가 같다.
 
-    두 경로 모두 patterns.json 로드·검증 → 필터 → 매칭 → 즉시 출력 → scan.db 저장
-    순서를 따르며, scans 행의 source로 어느 대상을 썼는지 남긴다.
+    내부적으로 다음을 고정 순서로 실행한다:
+    1) data/patterns.json 로드 및 검증
+    2) collect 테이블을 저장 순서대로 읽어 filters를 통과한 것만 정규식으로 매칭
+    3) 매칭 발생 즉시 콘솔에 출력
+    4) scans/matches를 data/scan.db에 저장
 
-    반환값은 scan_id, source, urls_total, urls_visited, status, 매칭 건수 요약,
-    method_filter를 포함한다.
+    반환값은 scan_id, source, chunks_total, chunks_scanned, status,
+    매칭 건수 요약, method_filter를 포함한다.
     """
 
 
 def collect_traffic(start_url: str | None = None) -> dict:
-    """브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 수집해 저장한다.
+    """브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 데이터를 수집해 저장한다.
 
     내부적으로 다음을 고정 순서로 실행한다:
-    1) 창을 띄우고(start_url이 있으면 그 페이지로) 브라우저가 보낸 요청을 모두 관찰
+    1) 창을 띄우고(start_url이 있으면 그 페이지로) 오가는 데이터를 관찰
     2) 사용자가 터미널에서 Enter를 누를 때까지 대기
-    3) 요청마다 url/method/헤더/본문을 data/scan.db의 collect 테이블에 즉시 저장
+    3) 관측 덩어리마다 위치/텍스트/URL/부가정보를 collect 테이블에 즉시 저장
 
-    urls.txt를 손으로 채우는 대신 실제 브라우징을 기록해 점검 대상을 만드는 도구다.
-    urls.txt를 변경하지 않는다.
+    수집 위치는 patterns.json의 targets 설정이 정한다. 정규식 매칭을 거치지 않은
+    원본을 그대로 남기며, 이후 run_scan이 이 데이터를 대상으로 탐지한다.
     """
 
 
@@ -263,7 +270,7 @@ def suggest_patterns(
 
 #### `source="collect"` — 아직 안 잡힌 값에서 새 패턴을 찾는 경로
 
-1. `retriever.find_collected(limit, with_body=True)` — 본문 있는 요청만 가져온다
+1. `retriever.find_collected(limit, location="request_body")` — 요청 본문 행만 가져온다
 2. `_induce.values_by_key()` — JSON 본문에서 **같은 키의 값끼리** 모은다
 3. 키별로 `_induce.induce_regex()` → `evaluate_candidate()`
 4. `support`(값 종류 수) 내림차순 → `tightness` → 길이 순으로 정렬해 반환
@@ -283,24 +290,20 @@ def suggest_patterns(
 상수로 근사하므로 구조가 다른 정규식끼리 비교하면 오해를 부른다 — 채택 판단은 `coverage`와
 음성 차단율로 한다.
 
-### `run_scan`의 두 경로
+### 수집과 탐지가 나뉜 이유
 
 ```
-urls.txt 있음 ──> _scan_by_visiting()  브라우저로 방문        source = data\urls.txt
-urls.txt 없음 ──> _scan_collected()    collect 테이블 재검사   source = data/scan.db#collect
-                        │
-                  둘 다 _record_chunk() 공유
-                  (필터 → 매칭 → 즉시 출력 → 저장)
+collect_traffic ──> collect 테이블 ──> run_scan ──> matches 테이블
+  (브라우저, 1회)     (원본 보관)      (브라우저 없음, 반복)   (패턴에 걸린 것)
 ```
 
-- 두 경로가 `_record_chunk()`를 공유하므로 **필터 적용과 저장 방식이 어긋날 수 없다.**
-  `filters.methods`도 양쪽에 동일하게 걸린다 (collect 경로는 `detail.method`를 채운다)
-- collect 경로의 위치 이름도 기존 것을 재사용한다 — 헤더는 `header`, 본문은 `request_body`.
-  `detail`에는 필터용 `method`와 원본 추적용 `collect_id`가 들어간다
-- 헤더 텍스트 형식(`이름: 값` 줄 목록)은 `_browser.headers_text()` 한 곳에만 정의한다.
-  브라우저 수집과 collect 재검사가 형식이 갈리면 `(?mi)^origin:`처럼 줄 시작에 의존하는
-  정규식이 한쪽에서만 동작한다
-- `urls.txt`도 없고 `collect`도 비어 있으면 `ValueError`로 사유와 다음 할 일을 알린다
+- **탐지를 몇 번이든 다시 돌릴 수 있다.** 패턴을 고쳐 재검사할 때 사이트를 또 방문하지
+  않으므로 빠르고, 대상 사이트에 부담을 주지 않는다
+- **로그인 후 페이지가 검사 대상에 들어온다.** 사람이 직접 이동해 수집하므로, 세션이
+  없어 접근 못 하던 페이지의 데이터도 남는다
+- `filters.methods`는 탐지 단계에 걸린다 — 수집은 전부 해 두고 검사 범위만 좁히므로,
+  필터를 바꿔 다시 검사해도 데이터를 다시 모을 필요가 없다
+- `collect`가 비어 있으면 `ValueError`로 사유와 다음 할 일(`collect_traffic` 먼저 실행)을 알린다
 
 ### `collect_traffic`의 수집 세션
 
@@ -367,7 +370,8 @@ python -m src.main "<자연어 요청>"
 
 예시:
 ```bash
-python -m src.main "urls.txt에 있는 사이트들 점검해서 토큰 유출 패턴 있는지 확인해줘"
+python -m src.main "url 수집"                              # 창을 띄워 직접 둘러본다
+python -m src.main "수집된 트래픽에서 토큰 유출 있는지 확인해줘"
 python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 ```
 
@@ -404,7 +408,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
    ```
 3. **최종 응답 (에이전트)**: 도구 실행이 끝난 뒤 LLM이 결과를 요약한 자연어 텍스트를 표준출력에 출력
    ```
-   urls.txt의 3개 URL을 점검한 결과, jwt-token 패턴이 2건(헤더 1건, 콘솔 1건) 발견되었습니다.
+   수집된 2082건을 검사한 결과, jwt-token 패턴이 2건(헤더 1건, 콘솔 1건) 발견되었습니다.
    상세 내역은 scan_id=7로 조회할 수 있습니다.
    ```
 
@@ -424,7 +428,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 
 예시 행:
 ```
-1,"urls.txt 사이트들 점검해서 토큰 유출 있는지 확인해줘",run_scan,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
+1,"수집된 트래픽에서 토큰 유출 있는지 확인해줘",run_scan,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
 2,"최근 jwt-token 매칭 결과 보여줘",query_matches,jwt-token,"재스캔 없이 query_matches만 호출해야 함"
 ```
 
@@ -436,7 +440,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 
 | verification.md 항목 | 설계 대응 |
 |---|---|
-| 1-x 수집 | `src/_browser.py`, `data/urls.txt`, `tools.run_scan()` |
+| 1-x 수집 | `src/_browser.py`(`record_session`), `collect` 테이블, `tools.collect_traffic()` |
 | 2-x 탐지 | `src/_matcher.py`, `data/patterns.json`(`patterns`, `filters.methods`) |
 | 3-x 매칭 기록 | `matches` 테이블 컬럼 구성 |
 | 4-x 저장 | `src/_storage.py`, `scans`/`matches` 스키마 |
@@ -447,9 +451,10 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 
 ## 11. 에러 처리 정책
 
-- URL 방문 실패 시 해당 URL만 건너뛰고 계속 진행, `urls_visited`에는 미포함
-- 콘솔에 `[SKIP] <url> - <에러 사유>` 출력
-- 종료 시 `scans.status`: 1개 이상 방문 성공 → `completed`, 전부 실패 → `failed`
+- 수집 중 개별 요청을 읽지 못하면(리다이렉트로 사라진 응답 등) 그 덩어리만 건너뛴다
+- `collect`가 비어 있으면 탐지를 시작하지 않고 `ValueError`로 사유를 알린다
+- 종료 시 `scans.status`: 1건 이상 검사 → `completed`, 하나도 못 하면 → `failed`
+- 도중에 예외가 나도 `finally`에서 `scans` 행을 마무리해 `running`으로 남기지 않는다
 
 ## 12. `.env` 항목 (`.env.example`)
 

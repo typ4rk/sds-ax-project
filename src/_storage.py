@@ -16,8 +16,8 @@ CREATE TABLE IF NOT EXISTS scans (
   source        TEXT NOT NULL,
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
-  urls_total    INTEGER NOT NULL,
-  urls_visited  INTEGER NOT NULL DEFAULT 0,
+  chunks_total   INTEGER NOT NULL,
+  chunks_scanned INTEGER NOT NULL DEFAULT 0,
   status        TEXT NOT NULL DEFAULT 'running'
 );
 
@@ -35,10 +35,10 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE TABLE IF NOT EXISTS collect (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   url           TEXT NOT NULL,
-  method        TEXT NOT NULL,
-  headers_json  TEXT,
-  body          TEXT,
-  time          TEXT NOT NULL
+  location      TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  detail_json   TEXT,
+  collected_at  TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_scan_id      ON matches(scan_id);
@@ -47,7 +47,8 @@ CREATE INDEX IF NOT EXISTS idx_matches_url          ON matches(url);
 CREATE INDEX IF NOT EXISTS idx_matches_matched_at   ON matches(matched_at);
 
 CREATE INDEX IF NOT EXISTS idx_collect_url          ON collect(url);
-CREATE INDEX IF NOT EXISTS idx_collect_time         ON collect(time);
+CREATE INDEX IF NOT EXISTS idx_collect_location     ON collect(location);
+CREATE INDEX IF NOT EXISTS idx_collect_collected_at ON collect(collected_at);
 """
 
 
@@ -70,47 +71,50 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def start_scan(conn: sqlite3.Connection, source: str, urls_total: int) -> int:
+def start_scan(conn: sqlite3.Connection, source: str, chunks_total: int) -> int:
     """스캔 시작을 scans 테이블에 기록하고 새 scan_id를 돌려준다."""
     cursor = conn.execute(
-        "INSERT INTO scans (source, started_at, urls_total, urls_visited, status)"
+        "INSERT INTO scans (source, started_at, chunks_total, chunks_scanned, status)"
         " VALUES (?, ?, ?, 0, 'running')",
-        (source, now_iso(), urls_total),
+        (source, now_iso(), chunks_total),
     )
     conn.commit()
     return int(cursor.lastrowid)
 
 
 def finish_scan(
-    conn: sqlite3.Connection, scan_id: int, urls_visited: int, status: str
+    conn: sqlite3.Connection, scan_id: int, chunks_scanned: int, status: str
 ) -> None:
-    """스캔 종료 시각과 방문 성공 건수, 최종 상태를 기록한다.
+    """스캔 종료 시각과 검사한 덩어리 수, 최종 상태를 기록한다.
 
-    status는 'completed'(1건 이상 방문 성공) 또는 'failed'(전부 실패)다.
+    status는 'completed'(1건 이상 검사) 또는 'failed'(하나도 못 함)다.
     """
     conn.execute(
-        "UPDATE scans SET finished_at = ?, urls_visited = ?, status = ? WHERE id = ?",
-        (now_iso(), urls_visited, status, scan_id),
+        "UPDATE scans SET finished_at = ?, chunks_scanned = ?, status = ? WHERE id = ?",
+        (now_iso(), chunks_scanned, status, scan_id),
     )
     conn.commit()
 
 
 def save_collected(
     conn: sqlite3.Connection,
+    location: str,
+    content: str,
     url: str,
-    method: str,
-    headers: dict,
-    body: str | None,
+    detail: dict,
 ) -> None:
-    """수집 세션에서 오간 요청 1건을 collect 테이블에 저장한다.
+    """수집 덩어리 1건을 collect 테이블에 저장한다.
 
-    matches와 달리 정규식 매칭을 거치지 않은 원본 트래픽이다. 헤더는 JSON 문자열로,
-    본문은 있으면 그대로 넣는다(GET처럼 본문이 없으면 NULL).
+    _browser의 emit(위치, 텍스트, URL, 부가정보)과 같은 모양으로 받는다. 그래서
+    수집 경로와 저장 형식이 어긋날 수 없고, 나중에 run_scan이 그대로 되돌려 검사한다.
+
+    matches와 달리 정규식 매칭을 거치지 않은 원본이다. location은 matches와 같은
+    어휘를 쓴다: header / body / request_body / cookie / console.
     """
     conn.execute(
-        "INSERT INTO collect (url, method, headers_json, body, time)"
+        "INSERT INTO collect (url, location, content, detail_json, collected_at)"
         " VALUES (?, ?, ?, ?, ?)",
-        (url, method, json.dumps(headers, ensure_ascii=False), body, now_iso()),
+        (url, location, content, json.dumps(detail or {}, ensure_ascii=False), now_iso()),
     )
     conn.commit()
 

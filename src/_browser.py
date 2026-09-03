@@ -1,14 +1,13 @@
-"""(내부) Playwright로 Chromium 세션을 열고 페이지 1개분의 관측 데이터를 수집한다.
+"""(내부) Playwright로 창을 띄워 사용자가 둘러보는 동안의 관측 데이터를 수집한다.
 
 이 모듈은 "수집"만 담당한다 — 패턴 매칭, 저장, 출력은 하지 않는다.
-수집한 데이터는 emit 콜백으로 한 덩어리씩 넘긴다.
+수집한 데이터는 emit 콜백으로 (위치, 텍스트, URL, 부가정보) 한 덩어리씩 넘긴다.
 """
 
 import json
-from contextlib import contextmanager
-from typing import Callable, Iterator
+from typing import Callable
 
-from playwright.sync_api import Browser, sync_playwright
+from playwright.sync_api import sync_playwright
 
 NAVIGATION_TIMEOUT_MS = 30_000
 
@@ -16,40 +15,26 @@ NAVIGATION_TIMEOUT_MS = 30_000
 Emit = Callable[[str, str, str, dict], None]
 # "이제 그만인가"를 반복해서 묻는 판정 콜백. 콘솔 입출력은 호출자가 맡는다.
 StopSignal = Callable[[], bool]
-# on_request(url, method, headers, body) 형태로 오간 요청 한 건을 넘긴다.
-RequestSink = Callable[[str, str, dict, "str | None"], None]
 # 판정 사이에 Playwright를 돌리는 간격. 짧을수록 새 탭이 빨리 풀리고 CPU를 조금 더 쓴다.
 PUMP_INTERVAL_MS = 200
 
 
-@contextmanager
-def browser_session(chrome_path: str | None = None) -> Iterator[Browser]:
-    """Chromium 브라우저를 열고, 블록을 벗어나면 반드시 닫는다.
-
-    chrome_path가 None이면 Playwright가 관리하는 Chromium을,
-    문자열이면 그 경로의 실행 파일을 executable_path로 사용한다.
-    """
-    with sync_playwright() as playwright:
-        launch_options: dict = {"headless": True}
-        if chrome_path:
-            launch_options["executable_path"] = chrome_path
-        browser = playwright.chromium.launch(**launch_options)
-        try:
-            yield browser
-        finally:
-            browser.close()
-
-
 def record_session(
     should_stop: StopSignal,
-    on_request: RequestSink,
+    emit: Emit,
+    targets: dict,
     start_url: str | None = None,
     chrome_path: str | None = None,
 ) -> int:
-    """창을 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 그대로 넘긴다.
+    """창을 띄워 사용자가 둘러보는 동안의 관측 데이터를 emit으로 넘긴다.
 
-    사람이 클릭으로 이동하는 동안 브라우저가 보낸 모든 요청을 on_request로 한 건씩
-    넘기고, 넘긴 건수를 돌려준다. 새 탭·팝업에서 나간 요청도 함께 잡는다.
+    수집 위치는 targets 설정이 정한다 — 요청/응답 헤더(header), 응답 바디(body),
+    요청 페이로드(request_body), 쿠키(cookie), 콘솔·JS 에러(console).
+    새 탭·팝업에서 오간 것도 함께 잡으며, 넘긴 덩어리 수를 돌려준다.
+
+    응답 바디는 핸들러 안에서 읽지 않는다 — sync API가 교착될 수 있어, 응답 객체만
+    쌓아 두고 대기 루프에서 꺼내 읽는다. 대신 요청의 url/method/headers/post_data는
+    왕복이 없는 속성이라 핸들러 안에서 바로 읽어도 안전하다.
 
     로그인 세션은 저장하지 않는다. storage_state()는 컨텍스트의 모든 쿠키를 내보내므로
     점검 대상뿐 아니라 메일·금융 등 무관한 사이트의 세션까지 평문 파일 하나에 모이는데,
@@ -60,22 +45,62 @@ def record_session(
     사이사이 Playwright를 계속 돌려야 하기 때문이다 — 메인 흐름을 막으면 새 탭·팝업이
     "디버거 붙기 대기" 상태로 정지해 페이지가 로딩되지 않는다.
     """
-    captured = 0
-    watched: set[int] = set()
+    network = targets.get("network") or {}
+    want_headers = bool(network.get("headers"))
+    want_body = bool(network.get("body"))
+    want_request_body = bool(network.get("requestBody"))
+    want_cookies = bool(network.get("cookies"))
+    want_console = bool(targets.get("console"))
 
-    def capture(request) -> None:
-        nonlocal captured
-        # url/method/headers/post_data는 왕복이 없는 속성이라 핸들러 안에서 안전하다.
-        # all_headers() 같은 메서드를 부르면 sync API가 교착될 수 있다.
-        on_request(request.url, request.method, dict(request.headers), request.post_data)
-        captured += 1
+    count = 0
+    watched: set[int] = set()
+    pending: list = []          # 바디를 아직 읽지 않은 응답 (대기 루프에서 꺼낸다)
+
+    def hand_over(location: str, text: str, url: str, detail: dict) -> None:
+        nonlocal count
+        if not text:
+            return
+        emit(location, text, url, detail)
+        count += 1
+
+    def on_request(request) -> None:
+        detail = {"direction": "request", "method": request.method}
+        if want_headers:
+            hand_over("header", headers_text(dict(request.headers)), request.url, detail)
+        if want_request_body:
+            hand_over("request_body", request.post_data or "", request.url, detail)
+
+    def on_response(response) -> None:
+        pending.append(response)
+
+    def on_console(kind: str, text: str, url: str) -> None:
+        hand_over("console", text, url, {"kind": kind})
+
+    def drain() -> None:
+        """쌓인 응답에서 헤더·바디를 읽어 넘긴다. 핸들러 밖에서만 호출한다."""
+        while pending:
+            response = pending.pop(0)
+            detail = {"direction": "response", "status": response.status}
+            if want_headers:
+                hand_over("header", _safe_headers(response), response.url, detail)
+            if want_body:
+                hand_over("body", _safe_body(response), response.url, detail)
 
     def watch(page) -> None:
         # context.on("page")는 new_page()로 만든 첫 페이지에도 발생할 수 있어 중복을 막는다.
         if id(page) in watched:
             return
         watched.add(id(page))
-        page.on("request", capture)
+        if want_headers or want_request_body:
+            page.on("request", on_request)
+        if want_headers or want_body:
+            page.on("response", on_response)
+        if want_console:
+            page.on("console", lambda msg: on_console("console", msg.text, page.url))
+            page.on(
+                "pageerror",
+                lambda err: on_console("pageerror", getattr(err, "message", str(err)), page.url),
+            )
 
     with sync_playwright() as playwright:
         launch_options: dict = {"headless": False}
@@ -93,20 +118,36 @@ def record_session(
             if start_url:
                 page.goto(start_url, wait_until="load", timeout=NAVIGATION_TIMEOUT_MS)
 
-            _pump_until(context, should_stop)
+            _pump_until(context, should_stop, drain)
+
+            # 쿠키는 창이 살아 있는 마지막 시점에 한 번 읽는다.
+            if want_cookies:
+                cookies = context.cookies()
+                if cookies:
+                    hand_over(
+                        "cookie",
+                        json.dumps(cookies, ensure_ascii=False),
+                        context.pages[0].url if context.pages else "",
+                        {"count": len(cookies)},
+                    )
         finally:
             browser.close()
 
-    return captured
+    return count
 
 
-def _pump_until(context, should_stop: StopSignal) -> None:
+def _pump_until(context, should_stop: StopSignal, drain=None) -> None:
     """should_stop이 참이 될 때까지 Playwright를 짧게 반복 대기시킨다.
 
     이 대기가 이벤트 루프를 돌려 새로 열린 탭의 정지를 풀어 준다. 살아 있는 페이지가
     있어야 대기할 수 있으므로, 사용자가 창을 모두 닫으면 그것도 종료 신호로 본다.
+
+    drain을 주면 매 회차에 한 번 불러, 핸들러 안에서 읽으면 위험한 작업(응답 바디)을
+    안전한 자리에서 처리하게 한다.
     """
     while not should_stop():
+        if drain:
+            drain()
         pages = [page for page in context.pages if not page.is_closed()]
         if not pages:
             return
@@ -116,116 +157,6 @@ def _pump_until(context, should_stop: StopSignal) -> None:
             # 대기 중에 그 탭이 닫혔을 뿐일 수 있으므로 다음 회차에 다시 고른다.
             if all(page.is_closed() for page in context.pages):
                 return
-
-
-def visit(
-    browser: Browser,
-    url: str,
-    targets: dict,
-    delay_ms: int,
-    emit: Emit,
-) -> None:
-    """URL 한 개를 방문해 네트워크/쿠키/콘솔 데이터를 수집하고 emit으로 넘긴다.
-
-    매 방문마다 새 컨텍스트를 만들어 이전 페이지의 쿠키·상태가 섞이지 않게 한다.
-    방문 자체가 실패하면 예외를 그대로 올려 호출자(run_scan)가 건너뛰기를 결정한다.
-    """
-    network = targets.get("network") or {}
-    want_headers = bool(network.get("headers"))
-    want_body = bool(network.get("body"))
-    want_request_body = bool(network.get("requestBody"))
-    want_cookies = bool(network.get("cookies"))
-    want_console = bool(targets.get("console"))
-
-    context = browser.new_context()
-    page = context.new_page()
-
-    requests: list = []
-    responses: list = []
-    console_lines: list[tuple[str, str]] = []
-
-    # 핸들러는 반드시 람다/함수로 넘긴다. list.append 같은 내장 메서드를 그대로 주면
-    # Playwright가 핸들러에 속성을 붙이려다 AttributeError로 실패한다.
-    if want_headers or want_request_body:
-        page.on("request", lambda request: requests.append(request))
-    if want_headers or want_body:
-        page.on("response", lambda response: responses.append(response))
-    if want_console:
-        page.on("console", lambda msg: console_lines.append(("console", msg.text)))
-        page.on(
-            "pageerror",
-            lambda err: console_lines.append(("pageerror", getattr(err, "message", str(err)))),
-        )
-
-    try:
-        page.goto(url, wait_until="load", timeout=NAVIGATION_TIMEOUT_MS)
-        if delay_ms > 0:
-            page.wait_for_timeout(delay_ms)
-
-        # 본문/헤더는 페이지 로드가 끝난 뒤에 읽는다.
-        # 이벤트 핸들러 안에서 body()를 부르면 sync API가 교착될 수 있다.
-        if want_headers:
-            for request in requests:
-                headers = _safe_headers(request)
-                if headers:
-                    emit(
-                        "header",
-                        headers,
-                        request.url,
-                        {"page_url": url, "direction": "request", "method": request.method},
-                    )
-            for response in responses:
-                headers = _safe_headers(response)
-                if headers:
-                    emit(
-                        "header",
-                        headers,
-                        response.url,
-                        {"page_url": url, "direction": "response", "status": response.status},
-                    )
-
-        if want_request_body:
-            # 브라우저가 내보낸 요청 페이로드. 응답 바디(body)와 달리 "나가는 데이터"다.
-            for request in requests:
-                payload = _safe_post_data(request)
-                if payload:
-                    emit(
-                        "request_body",
-                        payload,
-                        request.url,
-                        {
-                            "page_url": url,
-                            "direction": "request",
-                            "method": request.method,
-                        },
-                    )
-
-        if want_body:
-            for response in responses:
-                body = _safe_body(response)
-                if body:
-                    emit(
-                        "body",
-                        body,
-                        response.url,
-                        {"page_url": url, "status": response.status},
-                    )
-
-        if want_cookies:
-            cookies = context.cookies()
-            if cookies:
-                emit(
-                    "cookie",
-                    json.dumps(cookies, ensure_ascii=False),
-                    url,
-                    {"page_url": url, "count": len(cookies)},
-                )
-
-        if want_console:
-            for kind, line in console_lines:
-                emit("console", line, url, {"page_url": url, "kind": kind})
-    finally:
-        context.close()
 
 
 def headers_text(headers: dict) -> str:

@@ -16,9 +16,10 @@ my-pjt/
 ├── src/
 │   ├── main.py            # 실행 진입점: 자연어 요청을 받아 에이전트 호출
 │   ├── agent.py            # 메인 에이전트 그래프 (LangGraph ReAct 루프)
-│   ├── tools.py             # 도메인 도구: run_scan(스캔 실행), query_matches(저장된 매칭 조회)
+│   ├── tools.py             # 도메인 도구: collect_traffic(트래픽 수집), run_scan(탐지),
+│   │                        #             query_matches(조회), suggest_patterns(패턴 제안)
 │   └── retriever.py         # 단순 조회 헬퍼 (임베딩/RAG 아님 — SQLite 필터 조회)
-├── data/                   # 사용한 문서와 데이터 (urls.txt, patterns.json, scan.db)
+├── data/                   # 사용한 문서와 데이터 (patterns.json, scan.db)
 └── evaluation/
     ├── test_queries.csv     # 평가용 질의 목록
     └── report.md            # 평가 리포트

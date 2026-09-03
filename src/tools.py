@@ -15,125 +15,52 @@ from src import _browser, _induce, _matcher, _notify, _storage, retriever
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 # suggest_patterns가 한 패턴에 대해 돌려줄 최대 후보 수.
 MAX_CANDIDATES = 5
-URLS_PATH = DATA_DIR / "urls.txt"
 PATTERNS_PATH = DATA_DIR / "patterns.json"
 
 
 def run_scan() -> dict:
-    """등록된 정규식 패턴을 탐지한다. 대상은 data/urls.txt 유무로 갈린다.
+    """collect 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
-    - urls.txt가 있으면: 그 URL을 순서대로 브라우저로 방문하며 탐지한다(기존 동작).
-    - urls.txt가 없으면: collect_traffic이 scan.db의 collect 테이블에 모아 둔
-      요청 트래픽을 대상으로 탐지한다. 브라우저를 띄우지 않으므로 네트워크가 필요 없고,
-      로그인해야 보이던 페이지의 트래픽도 수집 당시 상태 그대로 검사된다.
+    collect_traffic이 수집해 둔 원본 관측 데이터를 대상으로 하므로 브라우저를 띄우지
+    않고 네트워크도 쓰지 않는다. 수집 당시의 상태(로그인 후 페이지 포함)가 그대로
+    검사되고, 같은 데이터로 몇 번 돌려도 결과가 같다.
 
-    두 경로 모두 patterns.json 로드·검증 → 필터 → 매칭 → 즉시 출력 → scan.db 저장
-    순서를 따르며, scans 행의 source로 어느 대상을 썼는지 남긴다.
+    내부적으로 다음을 고정 순서로 실행한다:
+    1) data/patterns.json 로드 및 검증
+    2) collect 테이블을 저장 순서대로 읽어 filters를 통과한 것만 정규식으로 매칭
+    3) 매칭 발생 즉시 콘솔에 출력
+    4) scans/matches를 data/scan.db에 저장
 
-    반환값은 에이전트가 요약에 쓸 수 있는 구조화된 결과(dict)이며,
-    scan_id, source, urls_total, urls_visited, status, 매칭 건수 요약을 포함한다.
+    반환값은 scan_id, source, chunks_total, chunks_scanned, status,
+    매칭 건수 요약, method_filter를 포함한다.
     """
     config = _load_config()
     patterns = _matcher.compile_patterns(config.get("patterns", []))
     methods = _method_filter(config.get("filters") or {})
 
-    if URLS_PATH.exists():
-        return _scan_by_visiting(config, patterns, methods)
-    return _scan_collected(patterns, methods)
-
-
-def _scan_by_visiting(config: dict, patterns: list, methods: set | None) -> dict:
-    """urls.txt의 URL을 브라우저로 방문하며 탐지한다 (기존 경로)."""
-    targets = config.get("targets") or {}
-    delay_ms = int(config.get("delayMs") or 0)
-    chrome_path = (config.get("browser") or {}).get("chromePath")
-
-    urls = _load_urls()
-    source = str(URLS_PATH.relative_to(DATA_DIR.parent))
-    conn = _storage.connect()
-    scan_id = _storage.start_scan(conn, source, len(urls))
-
-    visited = 0
-    skipped: list[dict] = []
-    tally = _new_tally()
-
-    try:
-        with _browser.browser_session(chrome_path) as browser:
-            for url in urls:
-                # visit은 반환값이 없고 emit 콜백으로만 수집 결과를 넘긴다.
-                before = dict(chunks=tally["chunks"], filtered=tally["filtered"], hits=tally["hits"])
-
-                def emit(location: str, text: str, source_url: str, detail: dict) -> None:
-                    _record_chunk(
-                        conn, scan_id, patterns, methods, tally,
-                        location, text, source_url, detail,
-                    )
-
-                try:
-                    _browser.visit(browser, url, targets, delay_ms, emit)
-                except Exception as exc:
-                    reason = f"{type(exc).__name__}: {exc}".splitlines()[0]
-                    _notify.notify_skip(url, reason)
-                    skipped.append({"url": url, "reason": reason})
-                    continue
-                _notify.notify_visit(
-                    url,
-                    tally["chunks"] - before["chunks"],
-                    tally["hits"] - before["hits"],
-                    tally["filtered"] - before["filtered"],
-                )
-                visited += 1
-    finally:
-        status = _finish(conn, scan_id, visited)
-
-    return _scan_result(scan_id, source, len(urls), visited, status, methods, tally, skipped)
-
-
-def _scan_collected(patterns: list, methods: set | None) -> dict:
-    """collect 테이블에 저장된 요청 트래픽을 대상으로 탐지한다 (urls.txt가 없을 때).
-
-    저장된 요청 1건에서 헤더는 header 위치로, 본문은 request_body 위치로 검사한다.
-    브라우저에서 수집할 때와 같은 위치 이름·헤더 형식을 쓰므로 같은 정규식이 그대로
-    동작하고, filters.methods도 detail.method를 통해 똑같이 적용된다.
-    """
     rows = retriever.find_collected()
     if not rows:
         raise ValueError(
-            "urls.txt가 없고 collect 테이블도 비어 있어 탐지할 대상이 없습니다."
-            " urls.txt를 만들거나 collect_traffic으로 트래픽을 먼저 수집하세요."
+            "collect 테이블이 비어 있어 탐지할 대상이 없습니다."
+            " collect_traffic으로 트래픽을 먼저 수집하세요."
         )
 
     source = "data/scan.db#collect"
-    distinct_urls = len({row["url"] for row in rows})
     conn = _storage.connect()
-    scan_id = _storage.start_scan(conn, source, distinct_urls)
+    scan_id = _storage.start_scan(conn, source, len(rows))
 
     tally = _new_tally()
     try:
         for row in rows:
-            detail = {
-                "page_url": row["url"],
-                "direction": "request",
-                "method": row["method"],
-                "collect_id": row["id"],
-            }
-            # find_collected가 headers_json을 dict로 파싱해 headers 키로 넘겨준다.
-            if row["headers"]:
-                _record_chunk(
-                    conn, scan_id, patterns, methods, tally,
-                    "header", _browser.headers_text(row["headers"]), row["url"], detail,
-                )
-            if row["body"]:
-                _record_chunk(
-                    conn, scan_id, patterns, methods, tally,
-                    "request_body", row["body"], row["url"], detail,
-                )
+            detail = {**row["detail"], "collect_id": row["id"]}
+            _record_chunk(
+                conn, scan_id, patterns, methods, tally,
+                row["location"], row["content"], row["url"], detail,
+            )
     finally:
-        status = _finish(conn, scan_id, distinct_urls)
+        status = _finish(conn, scan_id, tally["chunks"])
 
-    return _scan_result(
-        scan_id, source, distinct_urls, distinct_urls, status, methods, tally, []
-    )
+    return _scan_result(scan_id, source, len(rows), tally["chunks"], status, methods, tally, [])
 
 
 def _new_tally() -> dict:
@@ -184,12 +111,12 @@ def _scan_result(
     scan_id: int, source: str, total: int, processed: int, status: str,
     methods: set | None, tally: dict, skipped: list[dict],
 ) -> dict:
-    """두 탐지 경로가 같은 모양의 결과를 돌려주도록 조립한다."""
+    """탐지 결과를 에이전트가 요약하기 좋은 모양으로 조립한다."""
     return {
         "scan_id": scan_id,
         "source": source,
-        "urls_total": total,
-        "urls_visited": processed,
+        "chunks_total": total,
+        "chunks_scanned": processed,
         "status": status,
         "matches_total": sum(tally["by_pattern"].values()),
         "matches_by_pattern": dict(tally["by_pattern"]),
@@ -226,43 +153,47 @@ def collect_traffic(start_url: str | None = None) -> dict:
     """브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 수집해 저장한다.
 
     내부적으로 다음을 고정 순서로 실행한다:
-    1) 창을 띄우고(start_url이 있으면 그 페이지로) 브라우저가 보낸 요청을 모두 관찰
+    1) 창을 띄우고(start_url이 있으면 그 페이지로) 오가는 데이터를 관찰
     2) 사용자가 터미널에서 Enter를 누를 때까지 대기
-    3) 요청마다 url/method/헤더/본문을 data/scan.db의 collect 테이블에 즉시 저장
+    3) 관측 덩어리마다 위치/텍스트/URL/부가정보를 collect 테이블에 즉시 저장
 
-    정규식 매칭을 거치지 않은 원본 트래픽을 그대로 남긴다 — matches 테이블이
-    "패턴에 걸린 것"이라면 collect 테이블은 "오간 것 전부"다.
+    수집 위치는 patterns.json의 targets 설정이 정한다 — 요청·응답 헤더(header),
+    응답 바디(body), 요청 페이로드(request_body), 쿠키(cookie), 콘솔(console).
 
-    로그인 세션은 저장하지 않으므로, 로그인해야 보이는 페이지는 이 수집 중에만
-    관찰되고 run_scan이 재현할 때는 비로그인 상태로 접근한다.
+    정규식 매칭을 거치지 않은 원본을 그대로 남긴다 — matches 테이블이 "패턴에 걸린
+    것"이라면 collect 테이블은 "오간 것 전부"다. 이후 run_scan이 이 데이터를 대상으로
+    탐지하므로, 수집 당시 상태(로그인 후 페이지 포함)가 그대로 검사된다.
+
+    로그인 세션은 저장하지 않는다.
     """
     config = _load_config()
     conn = _storage.connect()
     try:
 
-        def sink(url: str, method: str, headers: dict, body: str | None) -> None:
-            _storage.save_collected(conn, url, method, headers, body)
+        def sink(location: str, text: str, url: str, detail: dict) -> None:
+            _storage.save_collected(conn, location, text, url, detail)
 
         captured = _browser.record_session(
             should_stop=_notify.recording_stopper(),
-            on_request=sink,
+            emit=sink,
+            targets=config.get("targets") or {},
             start_url=start_url,
             chrome_path=(config.get("browser") or {}).get("chromePath"),
         )
-        with_body = conn.execute(
-            "SELECT COUNT(*) FROM collect WHERE body IS NOT NULL AND body <> ''"
-        ).fetchone()[0]
+        by_location = dict(
+            conn.execute("SELECT location, COUNT(*) FROM collect GROUP BY location")
+        )
     finally:
         conn.close()
 
     _notify.notify_recorded(captured)
     return {
-        "requests_collected": captured,
+        "chunks_collected": captured,
         "saved_to": "data/scan.db (collect 테이블)",
-        "rows_with_body": with_body,
+        "collect_by_location": by_location,
         "note": (
-            "정규식 매칭을 거치지 않은 원본 요청입니다. 헤더와 본문에 인증 토큰이"
-            " 그대로 담길 수 있습니다. urls.txt는 변경하지 않았습니다."
+            "정규식 매칭을 거치지 않은 원본입니다. 헤더·본문·쿠키에 인증 토큰이"
+            " 그대로 담길 수 있습니다."
         ),
     }
 
@@ -299,14 +230,14 @@ def _suggest_from_collect(min_cluster: int, limit: int) -> dict:
     matches 경로와 달리 기준이 될 기존 정규식이 없어 회귀(lost) 판정을 할 수 없다.
     그래서 채택 게이트는 컴파일 가능·ReDoS 없음·커버리지만 본다.
     """
-    rows = retriever.find_collected(limit, with_body=True)
+    rows = retriever.find_collected(limit, location="request_body")
     if not rows:
         raise ValueError(
-            "collect 테이블에 body가 있는 행이 없습니다."
+            "collect 테이블에 요청 본문(request_body) 행이 없습니다."
             " collect_traffic으로 POST 트래픽을 먼저 수집하세요."
         )
 
-    buckets = _induce.values_by_key([row["body"] for row in rows])
+    buckets = _induce.values_by_key([row["content"] for row in rows])
     candidates = []
     skipped_keys = []
     for key, values in sorted(buckets.items()):
@@ -557,20 +488,3 @@ def _check_delay(delay_ms) -> None:
         raise ValueError(f"delayMs는 숫자여야 합니다: {delay_ms!r}") from None
     if value < 0:
         raise ValueError(f"delayMs는 0 이상이어야 합니다: {value}")
-
-
-def _load_urls() -> list[str]:
-    """data/urls.txt를 읽어 점검 대상 URL 목록을 순서대로 돌려준다.
-
-    빈 줄과 '#'로 시작하는 주석 줄은 무시한다.
-    """
-    if not URLS_PATH.exists():
-        raise FileNotFoundError(f"URL 목록 파일이 없습니다: {URLS_PATH}")
-    urls = []
-    for line in URLS_PATH.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            urls.append(stripped)
-    if not urls:
-        raise ValueError(f"점검할 URL이 없습니다: {URLS_PATH}")
-    return urls
