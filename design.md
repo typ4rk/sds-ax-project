@@ -174,10 +174,14 @@ def find_matches(
 | `find_matches(...)` | 조건별 매칭 조회. `tools.query_matches()`가 그대로 감싼다 |
 | `find_distinct_values(...)` | 중복 없는 `matched_value` + 빈도. 정규식 귀납의 양성 표본 |
 | `find_context_texts(...)` | 정규식이 적용된 적 없는 부수 텍스트(url, detail). 후보 검증 코퍼스 |
-| `find_collected(limit)` | `collect` 테이블의 원본 요청. `urls.txt` 없이 탐지할 때의 입력 |
+| `find_collected(limit, with_body)` | `collect` 테이블의 원본 요청. `urls.txt` 없이 탐지할 때의 입력 |
 
 `find_collected`는 `headers_json` 컬럼을 dict로 파싱해 **`headers` 키로 바꿔** 넘긴다.
 호출하는 쪽은 `headers_json`이 아니라 `headers`를 봐야 한다 (컬럼명과 반환 키가 다르다).
+
+`with_body=True`면 본문 있는 행만 **SQL 단계에서** 걸러 온다. 본문 있는 행은 전체의
+일부(대부분 GET)이므로, 파이썬에서 걸러내면 `limit`이 먼저 잘려 본문 행을 놓친다 —
+실제로 본문 14건 중 6건만 분석되던 버그의 원인이었다.
 
 - 이 파일은 순수 조회 로직만 담당 (상태 변경 없음)
 
@@ -234,21 +238,19 @@ def suggest_patterns(
     scan_id: int | None = None,
     min_cluster: int = 3,
     limit: int = 1000,
+    source: str = "matches",
 ) -> dict:
-    """저장된 매칭 값의 문자 구조를 분석해 더 정확한 정규식 후보를 제안한다.
+    """정규식 후보를 제안한다. 분석 대상은 source로 고른다.
 
-    임베딩을 쓰지 않는다 — 값을 문자 클래스 시그니처로 정규화해 군집화하고, 군집의
-    공통 접두/접미를 앵커로 고정한 뒤 가변부만 일반화해 후보를 조립한다. 그런 다음
-    정규식이 적용된 적 없는 부수 텍스트(url, detail)에 돌려 추가 탐지와 회귀를 센다.
-
-    매칭이 0건인 엄격한 패턴에는 완화 사다리를 돌려 어느 축(수량자/문자클래스/구분자/
-    리터럴/스킴)이 병목인지 함께 보고한다.
+    - source="matches"(기본): 이미 패턴에 걸린 값들을 분석해 더 좁은 후보를 만든다.
+    - source="collect": collect 테이블의 요청 본문(body)을 분석해 새 후보를 만든다.
+      아직 어떤 패턴에도 안 걸린 값에서 패턴을 찾을 때 쓴다.
 
     data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
     """
 ```
 
-`suggest_patterns`의 고정 순서:
+#### `source="matches"` — 기존 패턴을 좁히는 경로
 
 1. `retriever.find_distinct_values()` — 중복 없는 매칭 값과 빈도 (양성 표본)
 2. `retriever.find_context_texts()` — 정규식이 적용된 적 없는 부수 텍스트 (검증 코퍼스)
@@ -258,6 +260,24 @@ def suggest_patterns(
 
 **채택 게이트**: 기존 패턴이 잡던 값을 놓치지 않을 것(`lost` 없음), 컴파일될 것,
 중첩 수량자가 없을 것(ReDoS). 정렬은 `gained` 내림차순 → 음성 차단율 내림차순 → 길이 오름차순.
+
+#### `source="collect"` — 아직 안 잡힌 값에서 새 패턴을 찾는 경로
+
+1. `retriever.find_collected(limit, with_body=True)` — 본문 있는 요청만 가져온다
+2. `_induce.values_by_key()` — JSON 본문에서 **같은 키의 값끼리** 모은다
+3. 키별로 `_induce.induce_regex()` → `evaluate_candidate()`
+4. `support`(값 종류 수) 내림차순 → `tightness` → 길이 순으로 정렬해 반환
+
+**본문을 통째로 귀납하지 않는다.** 2600자 JSON을 그대로 넣으면 의미 있는 정규식이
+나오지 않는다. 반면 여러 요청의 같은 키(예: `bizCd`) 값들은 형식이 같을 가능성이 높아
+귀납 입력으로 적합하다. 서로 다른 값이 `min_cluster` 미만인 키는 과적합하므로 건너뛴다.
+
+**채택 게이트가 다르다.** 기준이 될 기존 정규식이 없어 회귀(`lost`)를 판정할 수 없으므로
+컴파일 가능·ReDoS 없음·커버리지만 본다. 이 한계를 반환값 `note`에 적는다.
+
+두 경로 모두 반환값에 **`source` 필드**를 넣는다. `matches` 경로의 `corpus_size`가
+`collect` 테이블의 데이터 양으로 오해된 적이 있어, 어느 테이블을 분석했는지 명시한다.
+`source`가 두 값 외이면 `ValueError`로 거부한다.
 
 `tightness`는 **같은 귀납 계열 안에서만** 비교 가능하다(strict < bounded < open). 무한 반복을
 상수로 근사하므로 구조가 다른 정규식끼리 비교하면 오해를 부른다 — 채택 판단은 `coverage`와
