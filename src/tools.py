@@ -20,61 +20,54 @@ PATTERNS_PATH = DATA_DIR / "patterns.json"
 
 
 def run_scan() -> dict:
-    """data/urls.txt에 저장된 URL을 순서대로 방문하며 등록된 정규식 패턴을 탐지한다.
+    """등록된 정규식 패턴을 탐지한다. 대상은 data/urls.txt 유무로 갈린다.
 
-    내부적으로 다음을 고정 순서로 실행한다:
-    1) data/patterns.json 로드 및 검증
-    2) data/urls.txt의 각 URL을 순서대로 방문 (실패한 URL은 건너뛰고 계속)
-    3) 방문마다 네트워크/콘솔 데이터를 수집하고, filters를 통과한 것만 정규식으로 매칭
-    4) 매칭 발생 즉시 콘솔에 출력
-    5) scans/matches를 data/scan.db에 저장
+    - urls.txt가 있으면: 그 URL을 순서대로 브라우저로 방문하며 탐지한다(기존 동작).
+    - urls.txt가 없으면: collect_traffic이 scan.db의 collect 테이블에 모아 둔
+      요청 트래픽을 대상으로 탐지한다. 브라우저를 띄우지 않으므로 네트워크가 필요 없고,
+      로그인해야 보이던 페이지의 트래픽도 수집 당시 상태 그대로 검사된다.
+
+    두 경로 모두 patterns.json 로드·검증 → 필터 → 매칭 → 즉시 출력 → scan.db 저장
+    순서를 따르며, scans 행의 source로 어느 대상을 썼는지 남긴다.
 
     반환값은 에이전트가 요약에 쓸 수 있는 구조화된 결과(dict)이며,
-    scan_id, urls_total, urls_visited, status, 매칭 건수 요약을 포함한다.
+    scan_id, source, urls_total, urls_visited, status, 매칭 건수 요약을 포함한다.
     """
     config = _load_config()
     patterns = _matcher.compile_patterns(config.get("patterns", []))
-    targets = config.get("targets") or {}
     methods = _method_filter(config.get("filters") or {})
+
+    if URLS_PATH.exists():
+        return _scan_by_visiting(config, patterns, methods)
+    return _scan_collected(patterns, methods)
+
+
+def _scan_by_visiting(config: dict, patterns: list, methods: set | None) -> dict:
+    """urls.txt의 URL을 브라우저로 방문하며 탐지한다 (기존 경로)."""
+    targets = config.get("targets") or {}
     delay_ms = int(config.get("delayMs") or 0)
     chrome_path = (config.get("browser") or {}).get("chromePath")
 
     urls = _load_urls()
+    source = str(URLS_PATH.relative_to(DATA_DIR.parent))
     conn = _storage.connect()
-    scan_id = _storage.start_scan(conn, str(URLS_PATH.relative_to(DATA_DIR.parent)), len(urls))
+    scan_id = _storage.start_scan(conn, source, len(urls))
 
     visited = 0
     skipped: list[dict] = []
-    by_pattern: Counter = Counter()
-    by_location: Counter = Counter()
+    tally = _new_tally()
 
     try:
         with _browser.browser_session(chrome_path) as browser:
             for url in urls:
                 # visit은 반환값이 없고 emit 콜백으로만 수집 결과를 넘긴다.
-                # 이 URL에서 덩어리/매칭이 각각 몇 건이었는지 세어 방문 끝에 알린다.
-                chunks = 0
-                filtered = 0
-                hits = 0
+                before = dict(chunks=tally["chunks"], filtered=tally["filtered"], hits=tally["hits"])
 
                 def emit(location: str, text: str, source_url: str, detail: dict) -> None:
-                    nonlocal chunks, filtered, hits
-                    chunks += 1
-                    if methods is not None and detail.get("method") not in methods:
-                        # filters.methods에 걸리지 않은 덩어리는 매칭 대상에서 뺀다.
-                        # method가 없는 수집 항목(응답 헤더/바디/쿠키/콘솔)도 여기서 제외된다.
-                        filtered += 1
-                        return
-                    found = _matcher.scan_text(patterns, text, location, source_url, detail)
-                    hits += len(found)
-                    # 수집 원본을 먼저 보여준다 (SCAN_TRACE=1일 때만).
-                    _notify.notify_collected(location, text, source_url, detail, len(found))
-                    for match in found:
-                        # 알림이 저장보다 먼저다 — 매칭 시점과 출력 시점 사이를 벌리지 않는다.
-                        _notify.notify_match(match)
-                        _storage.save_match(conn, scan_id, match)
-                        by_pattern[match["pattern_name"]] += 1
-                        by_location[match["location"]] += 1
+                    _record_chunk(
+                        conn, scan_id, patterns, methods, tally,
+                        location, text, source_url, detail,
+                    )
 
                 try:
                     _browser.visit(browser, url, targets, delay_ms, emit)
@@ -83,25 +76,124 @@ def run_scan() -> dict:
                     _notify.notify_skip(url, reason)
                     skipped.append({"url": url, "reason": reason})
                     continue
-                _notify.notify_visit(url, chunks, hits, filtered)
+                _notify.notify_visit(
+                    url,
+                    tally["chunks"] - before["chunks"],
+                    tally["hits"] - before["hits"],
+                    tally["filtered"] - before["filtered"],
+                )
                 visited += 1
     finally:
-        # 도중에 예외가 나더라도 scans 행을 running 상태로 남기지 않는다.
-        status = "completed" if visited > 0 else "failed"
-        try:
-            _storage.finish_scan(conn, scan_id, visited, status)
-        finally:
-            # 상태 기록이 실패해도 커넥션은 반드시 닫는다.
-            conn.close()
+        status = _finish(conn, scan_id, visited)
 
+    return _scan_result(scan_id, source, len(urls), visited, status, methods, tally, skipped)
+
+
+def _scan_collected(patterns: list, methods: set | None) -> dict:
+    """collect 테이블에 저장된 요청 트래픽을 대상으로 탐지한다 (urls.txt가 없을 때).
+
+    저장된 요청 1건에서 헤더는 header 위치로, 본문은 request_body 위치로 검사한다.
+    브라우저에서 수집할 때와 같은 위치 이름·헤더 형식을 쓰므로 같은 정규식이 그대로
+    동작하고, filters.methods도 detail.method를 통해 똑같이 적용된다.
+    """
+    rows = retriever.find_collected()
+    if not rows:
+        raise ValueError(
+            "urls.txt가 없고 collect 테이블도 비어 있어 탐지할 대상이 없습니다."
+            " urls.txt를 만들거나 collect_traffic으로 트래픽을 먼저 수집하세요."
+        )
+
+    source = "data/scan.db#collect"
+    distinct_urls = len({row["url"] for row in rows})
+    conn = _storage.connect()
+    scan_id = _storage.start_scan(conn, source, distinct_urls)
+
+    tally = _new_tally()
+    try:
+        for row in rows:
+            detail = {
+                "page_url": row["url"],
+                "direction": "request",
+                "method": row["method"],
+                "collect_id": row["id"],
+            }
+            # find_collected가 headers_json을 dict로 파싱해 headers 키로 넘겨준다.
+            if row["headers"]:
+                _record_chunk(
+                    conn, scan_id, patterns, methods, tally,
+                    "header", _browser.headers_text(row["headers"]), row["url"], detail,
+                )
+            if row["body"]:
+                _record_chunk(
+                    conn, scan_id, patterns, methods, tally,
+                    "request_body", row["body"], row["url"], detail,
+                )
+    finally:
+        status = _finish(conn, scan_id, distinct_urls)
+
+    return _scan_result(
+        scan_id, source, distinct_urls, distinct_urls, status, methods, tally, []
+    )
+
+
+def _new_tally() -> dict:
+    """두 탐지 경로가 공유하는 집계 상자를 만든다."""
+    return {"chunks": 0, "filtered": 0, "hits": 0,
+            "by_pattern": Counter(), "by_location": Counter()}
+
+
+def _record_chunk(
+    conn, scan_id: int, patterns: list, methods: set | None, tally: dict,
+    location: str, text: str, url: str, detail: dict,
+) -> None:
+    """수집 덩어리 한 건을 필터 → 매칭 → 즉시 출력 → 저장까지 처리한다.
+
+    브라우저 방문 경로와 collect 테이블 경로가 이 함수를 공유하므로, 두 경로의
+    필터 적용과 저장 방식이 어긋날 수 없다.
+    """
+    tally["chunks"] += 1
+    if methods is not None and detail.get("method") not in methods:
+        # filters.methods에 걸리지 않은 덩어리는 매칭 대상에서 뺀다.
+        # method가 없는 수집 항목(응답 헤더/바디/쿠키/콘솔)도 여기서 제외된다.
+        tally["filtered"] += 1
+        return
+    found = _matcher.scan_text(patterns, text, location, url, detail)
+    tally["hits"] += len(found)
+    # 수집 원본을 먼저 보여준다 (SCAN_TRACE=1일 때만).
+    _notify.notify_collected(location, text, url, detail, len(found))
+    for match in found:
+        # 알림이 저장보다 먼저다 — 매칭 시점과 출력 시점 사이를 벌리지 않는다.
+        _notify.notify_match(match)
+        _storage.save_match(conn, scan_id, match)
+        tally["by_pattern"][match["pattern_name"]] += 1
+        tally["by_location"][match["location"]] += 1
+
+
+def _finish(conn, scan_id: int, processed: int) -> str:
+    """scans 행을 마무리하고 커넥션을 닫는다. 예외 중에도 running으로 남기지 않는다."""
+    status = "completed" if processed > 0 else "failed"
+    try:
+        _storage.finish_scan(conn, scan_id, processed, status)
+    finally:
+        # 상태 기록이 실패해도 커넥션은 반드시 닫는다.
+        conn.close()
+    return status
+
+
+def _scan_result(
+    scan_id: int, source: str, total: int, processed: int, status: str,
+    methods: set | None, tally: dict, skipped: list[dict],
+) -> dict:
+    """두 탐지 경로가 같은 모양의 결과를 돌려주도록 조립한다."""
     return {
         "scan_id": scan_id,
-        "urls_total": len(urls),
-        "urls_visited": visited,
+        "source": source,
+        "urls_total": total,
+        "urls_visited": processed,
         "status": status,
-        "matches_total": sum(by_pattern.values()),
-        "matches_by_pattern": dict(by_pattern),
-        "matches_by_location": dict(by_location),
+        "matches_total": sum(tally["by_pattern"].values()),
+        "matches_by_pattern": dict(tally["by_pattern"]),
+        "matches_by_location": dict(tally["by_location"]),
         "method_filter": sorted(methods) if methods is not None else None,
         "skipped": skipped,
     }
@@ -128,6 +220,51 @@ def query_matches(
         scan_id=scan_id,
         limit=limit,
     )
+
+
+def collect_traffic(start_url: str | None = None) -> dict:
+    """브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 수집해 저장한다.
+
+    내부적으로 다음을 고정 순서로 실행한다:
+    1) 창을 띄우고(start_url이 있으면 그 페이지로) 브라우저가 보낸 요청을 모두 관찰
+    2) 사용자가 터미널에서 Enter를 누를 때까지 대기
+    3) 요청마다 url/method/헤더/본문을 data/scan.db의 collect 테이블에 즉시 저장
+
+    정규식 매칭을 거치지 않은 원본 트래픽을 그대로 남긴다 — matches 테이블이
+    "패턴에 걸린 것"이라면 collect 테이블은 "오간 것 전부"다.
+
+    로그인 세션은 저장하지 않으므로, 로그인해야 보이는 페이지는 이 수집 중에만
+    관찰되고 run_scan이 재현할 때는 비로그인 상태로 접근한다.
+    """
+    config = _load_config()
+    conn = _storage.connect()
+    try:
+
+        def sink(url: str, method: str, headers: dict, body: str | None) -> None:
+            _storage.save_collected(conn, url, method, headers, body)
+
+        captured = _browser.record_session(
+            should_stop=_notify.recording_stopper(),
+            on_request=sink,
+            start_url=start_url,
+            chrome_path=(config.get("browser") or {}).get("chromePath"),
+        )
+        with_body = conn.execute(
+            "SELECT COUNT(*) FROM collect WHERE body IS NOT NULL AND body <> ''"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    _notify.notify_recorded(captured)
+    return {
+        "requests_collected": captured,
+        "saved_to": "data/scan.db (collect 테이블)",
+        "rows_with_body": with_body,
+        "note": (
+            "정규식 매칭을 거치지 않은 원본 요청입니다. 헤더와 본문에 인증 토큰이"
+            " 그대로 담길 수 있습니다. urls.txt는 변경하지 않았습니다."
+        ),
+    }
 
 
 def suggest_patterns(

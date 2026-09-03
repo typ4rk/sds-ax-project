@@ -23,13 +23,17 @@ SYSTEM_PROMPT = (
     "사용자가 새 점검을 명시적으로 요청할 때만 호출하세요. 이미 저장된 결과를 분석하는 "
     "요청(왜 안 잡히는지, 패턴이 적절한지, 무엇이 발견됐는지)에는 run_scan을 부르지 말고 "
     "query_matches나 suggest_patterns로 답하세요. 저장된 데이터가 부족하면 스스로 "
-    "재점검하지 말고, 재점검이 필요하다는 사실을 사용자에게 알리고 판단을 맡기세요."
+    "재점검하지 말고, 재점검이 필요하다는 사실을 사용자에게 알리고 판단을 맡기세요. "
+    "\"url 수집\"처럼 직접 둘러보며 트래픽을 모으겠다는 요청이면 collect_traffic을 "
+    "호출하세요. 이 도구는 창을 띄우고 사용자가 Enter를 누를 때까지 기다리므로 "
+    "시간이 걸립니다. 끝나면 수집한 요청 건수와 저장 위치(scan.db의 collect 테이블)를 "
+    "알리고, 헤더·본문에 인증 토큰이 그대로 담길 수 있다는 점도 함께 알려주세요."
 )
 
 
 def build_agent():
     """Bedrock 모델과 도구를 연결한 패턴 탐지 에이전트를 생성한다."""
-    from src.tools import query_matches, run_scan, suggest_patterns
+    from src.tools import collect_traffic, query_matches, run_scan, suggest_patterns
 
     model = ChatBedrockConverse(
         model=_required_env("BEDROCK_MODEL_ID"),
@@ -38,7 +42,7 @@ def build_agent():
 
     return create_agent(
         model=model,
-        tools=[run_scan, query_matches, suggest_patterns],
+        tools=[run_scan, query_matches, suggest_patterns, collect_traffic],
         system_prompt=SYSTEM_PROMPT,
     )
 

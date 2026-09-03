@@ -14,6 +14,12 @@ NAVIGATION_TIMEOUT_MS = 30_000
 
 # emit(location, text, url, detail) 형태로 수집 결과 한 덩어리를 넘긴다.
 Emit = Callable[[str, str, str, dict], None]
+# "이제 그만인가"를 반복해서 묻는 판정 콜백. 콘솔 입출력은 호출자가 맡는다.
+StopSignal = Callable[[], bool]
+# on_request(url, method, headers, body) 형태로 오간 요청 한 건을 넘긴다.
+RequestSink = Callable[[str, str, dict, "str | None"], None]
+# 판정 사이에 Playwright를 돌리는 간격. 짧을수록 새 탭이 빨리 풀리고 CPU를 조금 더 쓴다.
+PUMP_INTERVAL_MS = 200
 
 
 @contextmanager
@@ -34,7 +40,91 @@ def browser_session(chrome_path: str | None = None) -> Iterator[Browser]:
             browser.close()
 
 
-def visit(browser: Browser, url: str, targets: dict, delay_ms: int, emit: Emit) -> None:
+def record_session(
+    should_stop: StopSignal,
+    on_request: RequestSink,
+    start_url: str | None = None,
+    chrome_path: str | None = None,
+) -> int:
+    """창을 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 그대로 넘긴다.
+
+    사람이 클릭으로 이동하는 동안 브라우저가 보낸 모든 요청을 on_request로 한 건씩
+    넘기고, 넘긴 건수를 돌려준다. 새 탭·팝업에서 나간 요청도 함께 잡는다.
+
+    로그인 세션은 저장하지 않는다. storage_state()는 컨텍스트의 모든 쿠키를 내보내므로
+    점검 대상뿐 아니라 메일·금융 등 무관한 사이트의 세션까지 평문 파일 하나에 모이는데,
+    점검 도구가 만들어 낼 위험으로는 과하다고 보아 기능에서 뺐다.
+
+    언제 끝낼지는 should_stop 콜백이 정한다 — 이 모듈은 콘솔 입출력을 하지 않는다.
+    이 콜백은 "한 번 기다리는" 것이 아니라 "이제 그만인가"를 반복해서 판정한다.
+    사이사이 Playwright를 계속 돌려야 하기 때문이다 — 메인 흐름을 막으면 새 탭·팝업이
+    "디버거 붙기 대기" 상태로 정지해 페이지가 로딩되지 않는다.
+    """
+    captured = 0
+    watched: set[int] = set()
+
+    def capture(request) -> None:
+        nonlocal captured
+        # url/method/headers/post_data는 왕복이 없는 속성이라 핸들러 안에서 안전하다.
+        # all_headers() 같은 메서드를 부르면 sync API가 교착될 수 있다.
+        on_request(request.url, request.method, dict(request.headers), request.post_data)
+        captured += 1
+
+    def watch(page) -> None:
+        # context.on("page")는 new_page()로 만든 첫 페이지에도 발생할 수 있어 중복을 막는다.
+        if id(page) in watched:
+            return
+        watched.add(id(page))
+        page.on("request", capture)
+
+    with sync_playwright() as playwright:
+        launch_options: dict = {"headless": False}
+        if chrome_path:
+            launch_options["executable_path"] = chrome_path
+        browser = playwright.chromium.launch(**launch_options)
+        try:
+            context = browser.new_context()
+            # 사용자가 창을 닫으면 대기 중이던 호출이 실패하는데, 기본 타임아웃(30초)을
+            # 그대로 두면 그만큼 멈춘 뒤에야 알아챈다. 펌프 간격 기준으로 짧게 줄인다.
+            context.set_default_timeout(PUMP_INTERVAL_MS * 5)
+            context.on("page", watch)
+            page = context.new_page()
+            watch(page)
+            if start_url:
+                page.goto(start_url, wait_until="load", timeout=NAVIGATION_TIMEOUT_MS)
+
+            _pump_until(context, should_stop)
+        finally:
+            browser.close()
+
+    return captured
+
+
+def _pump_until(context, should_stop: StopSignal) -> None:
+    """should_stop이 참이 될 때까지 Playwright를 짧게 반복 대기시킨다.
+
+    이 대기가 이벤트 루프를 돌려 새로 열린 탭의 정지를 풀어 준다. 살아 있는 페이지가
+    있어야 대기할 수 있으므로, 사용자가 창을 모두 닫으면 그것도 종료 신호로 본다.
+    """
+    while not should_stop():
+        pages = [page for page in context.pages if not page.is_closed()]
+        if not pages:
+            return
+        try:
+            pages[0].wait_for_timeout(PUMP_INTERVAL_MS)
+        except Exception:
+            # 대기 중에 그 탭이 닫혔을 뿐일 수 있으므로 다음 회차에 다시 고른다.
+            if all(page.is_closed() for page in context.pages):
+                return
+
+
+def visit(
+    browser: Browser,
+    url: str,
+    targets: dict,
+    delay_ms: int,
+    emit: Emit,
+) -> None:
     """URL 한 개를 방문해 네트워크/쿠키/콘솔 데이터를 수집하고 emit으로 넘긴다.
 
     매 방문마다 새 컨텍스트를 만들어 이전 페이지의 쿠키·상태가 섞이지 않게 한다.
@@ -138,13 +228,22 @@ def visit(browser: Browser, url: str, targets: dict, delay_ms: int, emit: Emit) 
         context.close()
 
 
+def headers_text(headers: dict) -> str:
+    """헤더 dict를 "이름: 값" 줄 목록으로 만든다.
+
+    브라우저에서 갓 수집한 헤더와 collect 테이블에 저장된 헤더가 같은 형식이어야
+    한 정규식이 양쪽에서 똑같이 동작한다(예: `(?mi)^origin:`은 줄 시작에 의존한다).
+    그래서 형식 정의를 이 한 곳에만 둔다.
+    """
+    return "\n".join(f"{name}: {value}" for name, value in headers.items())
+
+
 def _safe_headers(target) -> str:
     """요청/응답 헤더를 "이름: 값" 줄 목록으로 만든다. 읽을 수 없으면 빈 문자열."""
     try:
-        headers = target.all_headers()
+        return headers_text(target.all_headers())
     except Exception:
         return ""
-    return "\n".join(f"{name}: {value}" for name, value in headers.items())
 
 
 def _safe_body(response) -> str:

@@ -2,5 +2,5 @@
 # 빈 줄과 '#'로 시작하는 줄은 무시한다.
 
 https://www.naver.com/
-https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
+https://news.naver.com/
 https://finance.naver.com/

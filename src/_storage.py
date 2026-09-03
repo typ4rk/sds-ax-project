@@ -32,10 +32,22 @@ CREATE TABLE IF NOT EXISTS matches (
   matched_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS collect (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  url           TEXT NOT NULL,
+  method        TEXT NOT NULL,
+  headers_json  TEXT,
+  body          TEXT,
+  time          TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_matches_scan_id      ON matches(scan_id);
 CREATE INDEX IF NOT EXISTS idx_matches_pattern_name ON matches(pattern_name);
 CREATE INDEX IF NOT EXISTS idx_matches_url          ON matches(url);
 CREATE INDEX IF NOT EXISTS idx_matches_matched_at   ON matches(matched_at);
+
+CREATE INDEX IF NOT EXISTS idx_collect_url          ON collect(url);
+CREATE INDEX IF NOT EXISTS idx_collect_time         ON collect(time);
 """
 
 
@@ -79,6 +91,26 @@ def finish_scan(
     conn.execute(
         "UPDATE scans SET finished_at = ?, urls_visited = ?, status = ? WHERE id = ?",
         (now_iso(), urls_visited, status, scan_id),
+    )
+    conn.commit()
+
+
+def save_collected(
+    conn: sqlite3.Connection,
+    url: str,
+    method: str,
+    headers: dict,
+    body: str | None,
+) -> None:
+    """수집 세션에서 오간 요청 1건을 collect 테이블에 저장한다.
+
+    matches와 달리 정규식 매칭을 거치지 않은 원본 트래픽이다. 헤더는 JSON 문자열로,
+    본문은 있으면 그대로 넣는다(GET처럼 본문이 없으면 NULL).
+    """
+    conn.execute(
+        "INSERT INTO collect (url, method, headers_json, body, time)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (url, method, json.dumps(headers, ensure_ascii=False), body, now_iso()),
     )
     conn.commit()
 

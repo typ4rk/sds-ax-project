@@ -9,6 +9,8 @@
 
 import os
 import sys
+import threading
+from typing import Callable
 
 TRACE_ENV = "SCAN_TRACE"
 PREVIEW_CHARS = 300
@@ -36,6 +38,47 @@ def notify_match(match: dict) -> None:
         f"|url={match['url']}"
         f"|context={_clip(context, CONTEXT_CHARS)}"
         f"|detail={_clip(detail, DETAIL_CHARS)}",
+        flush=True,
+    )
+
+
+def recording_stopper() -> Callable[[], bool]:
+    """Enter를 백그라운드에서 기다리고, 눌렸는지 알려주는 판정 함수를 돌려준다.
+
+    호출한 쪽이 이 판정을 반복해서 물어보며 그 사이에 Playwright를 계속 돌려야 한다.
+    input()으로 메인 흐름을 막으면 Playwright가 이벤트를 처리하지 못해, 새 탭·팝업이
+    "디버거 붙기 대기" 상태로 정지한 채 페이지가 로딩되지 않는다.
+
+    표준입력이 닫혀 있으면(EOF) 곧바로 종료로 판정한다 — 비대화형 실행에서 무한정
+    멈추지 않게 하기 위한 것이며, 그 경우 수집된 URL이 거의 없을 수 있다.
+    안내는 최종 응답(표준출력)과 섞이지 않도록 표준에러로 보낸다.
+    """
+    print(
+        "[RECORD] 브라우저에서 점검하고 싶은 페이지를 둘러보세요.\n"
+        "[RECORD] 로그인 세션은 저장하지 않으므로, 로그인 후에만 보이는 페이지는"
+        " 나중에 재현되지 않습니다.\n"
+        "[RECORD] 다 끝나면 이 터미널에서 Enter를 누르세요.",
+        file=sys.stderr,
+        flush=True,
+    )
+    done = threading.Event()
+
+    def wait_for_enter() -> None:
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            print("[RECORD] 입력이 없어 수집을 끝냅니다.", file=sys.stderr, flush=True)
+        done.set()
+
+    threading.Thread(target=wait_for_enter, daemon=True).start()
+    return done.is_set
+
+
+def notify_recorded(request_count: int) -> None:
+    """수집 결과를 사람이 확인할 수 있게 표준에러로 요약한다."""
+    print(
+        f"[RECORD] 요청 {request_count}건을 collect 테이블에 저장했습니다.",
+        file=sys.stderr,
         flush=True,
     )
 

@@ -9,7 +9,7 @@
     "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },
     "console": true
   },
-  "filters": { "methods": [] },
+  "filters": { "methods": ["POST"] },
   "delayMs": 500,
   "browser": { "chromePath": null }
 }

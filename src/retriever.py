@@ -146,6 +146,37 @@ def find_context_texts(scan_id: int | None = None, limit: int = 2000) -> list[st
     return sorted(texts)
 
 
+def find_collected(limit: int = 5000) -> list[dict]:
+    """collect 테이블에 저장된 요청 트래픽을 저장 순서대로 돌려준다.
+
+    collect_traffic이 모아 둔 원본 요청이며, urls.txt 없이 탐지할 때 입력이 된다.
+    headers_json 컬럼은 dict로 파싱해 headers 키로 바꿔 넘긴다(파싱 실패 시 빈 dict).
+    호출하는 쪽은 headers_json이 아니라 headers를 봐야 한다.
+
+    반환 항목: {"id", "url", "method", "headers", "body", "time"}
+    """
+    conn = _storage.connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, url, method, headers_json, body, time"
+            " FROM collect ORDER BY id LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    collected = []
+    for row in rows:
+        record = dict(row)
+        raw = record.pop("headers_json", None)
+        try:
+            record["headers"] = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            record["headers"] = {}
+        collected.append(record)
+    return collected
+
+
 def _leaf_strings(raw_detail) -> list[str]:
     """detail_json 안에 들어 있는 문자열 값만 평평하게 뽑아낸다."""
     if not raw_detail:
