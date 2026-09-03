@@ -1,6 +1,6 @@
 # 세부 설계
 
-[service.md](service.md)의 기능 정의와 [claude.md](claude.md)의 프로젝트 규칙
+[service.md](service.md)의 기능 정의와 [CLAUDE.md](CLAUDE.md)의 프로젝트 규칙
 (Python + LangChain/LangGraph + Bedrock + `create_agent`, ReAct/LangGraph 실습 목적)을
 기준으로 한 설계. HTTP 서버·RAG(임베딩 검색)는 사용하지 않는다 — CLI로 한 번 실행하고
 종료하는 온디맨드 도구이며, `retriever.py`는 저장된 매칭을 SQLite에서 조건으로 걸러오는
@@ -8,14 +8,14 @@
 
 ## 1. 디렉토리 구조
 
-`claude.md`가 고정한 구조(`src/main.py`, `src/agent.py`, `src/tools.py`, `src/retriever.py`, `data/`, `evaluation/`)는
+`CLAUDE.md`가 고정한 구조(`src/main.py`, `src/agent.py`, `src/tools.py`, `src/retriever.py`, `data/`, `evaluation/`)는
 이름·위치를 바꾸지 않는다. "파일 하나에 한 가지 역할만 둔다" 규칙을 지키기 위해,
 브라우저 제어/매칭/저장/알림처럼 `tools.py`·`retriever.py`가 내부적으로 쓰는 로직은
 `src/` 밑에 언더스코어 접두사 헬퍼 모듈로 분리한다 (제출 규약 대상이 아닌 내부 구현).
 
 ```
 my-pjt/
-├── claude.md
+├── CLAUDE.md
 ├── service.md
 ├── verification.md
 ├── design.md

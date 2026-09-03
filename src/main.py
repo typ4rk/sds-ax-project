@@ -28,7 +28,7 @@ def main(argv: list[str]) -> int:
     if request:
         return _print_answer(agent, request)
 
-    return _repl(agent)
+    return _chat_loop(agent)
 
 
 def _print_answer(agent, request: str) -> int:
@@ -48,7 +48,7 @@ def _ask(agent, request: str) -> str:
     return _text_of(result["messages"][-1])
 
 
-def _repl(agent) -> int:
+def _chat_loop(agent) -> int:
     """인자 없이 실행했을 때의 대화형 모드. 빈 줄이나 EOF로 종료한다."""
     print('대화형 모드입니다. 빈 줄을 입력하면 종료합니다.', file=sys.stderr)
     while True:
