@@ -3,7 +3,7 @@
 `evaluation/test_queries.csv`를 `python -m src.main "<question>"`으로 실제 실행한 결과를 기록한다.
 
 > **상태: 부분 검증.** 도구 함수를 직접 호출하는 경로는 [verification.md](../verification.md)
-> 64건 중 31건을 확인했다. 반면 **에이전트(LLM) 경로는 전부 미실행**이며, 아래 1절 질의별
+> 74건 중 43건을 확인했다. 반면 **에이전트(LLM) 경로는 전부 미실행**이며, 아래 1절 질의별
 > 결과는 채울 자리만 잡아둔 것이다. `.env`의 `BEDROCK_MODEL_ID`·`AWS_REGION`은 채워져 있고
 > Bedrock 호출까지 도달하지만, 현재 Bedrock 일일 토큰 쿼터
 > (`ThrottlingException: Too many tokens per day`)에 걸려 응답을 받지 못한다.
@@ -32,22 +32,23 @@
 
 ## 2. 기능별 검증
 
-[verification.md](../verification.md)의 케이스 64건을 기능별로 집계한다.
+[verification.md](../verification.md)의 케이스 74건을 기능별로 집계한다.
 개별 케이스의 판정 기준은 그 파일을 따른다.
 
 | 기능 | 설계 대응 | 케이스 | Pass | Fail | 미실행 |
 |---|---|---|---|---|---|
-| 1-x 수집 | `src/_browser.py`, `data/urls.txt` | 14 | 9 | 0 | 5 |
+| 1-x 수집 | `src/_browser.py`, `data/urls.txt` | 17 | 12 | 0 | 5 |
 | 2-x 탐지 | `src/_matcher.py`, `data/patterns.json` | 10 | 5 | 0 | 5 |
 | 3-x 매칭 기록 | `matches` 테이블 컬럼 구성 | 7 | 3 | 0 | 4 |
-| 4-x 저장 | `src/_storage.py` | 7 | 1 | 0 | 6 |
-| 5-x 조회 | `src/retriever.py`, `tools.query_matches()` | 13 | 5 | 0 | 8 |
+| 4-x 저장 | `src/_storage.py` | 8 | 2 | 0 | 6 |
+| 5-x 조회 | `src/retriever.py`, `tools.query_matches()` | 14 | 6 | 0 | 8 |
 | 6-x 알림 | `src/_notify.py` | 7 | 4 | 0 | 3 |
 | 7-x 패턴 도출 | `src/_induce.py`, `tools.suggest_patterns()` | 6 | 6 | 0 | 0 |
-| **합계** | | **64** | **31** | **0** | **33** |
+| 8-x 트래픽 수집 | `_browser.record_session()`, `tools.collect_traffic()` | 5 | 5 | 0 | 0 |
+| **합계** | | **74** | **43** | **0** | **31** |
 
-현재 통과율 **31/64 (48%)** — 출시 기준(90%) 미달. Fail은 아직 없고 전부 미실행이다.
-확인된 31건의 목록은 [verification.md](../verification.md) 「현재까지 확인된 항목」 참고.
+현재 통과율 **43/74 (58%)** — 출시 기준(90%) 미달. Fail은 아직 없고 전부 미실행이다.
+확인된 43건의 목록은 [verification.md](../verification.md) 「현재까지 확인된 항목」 참고.
 
 ## 3. 성공 기준 대비
 

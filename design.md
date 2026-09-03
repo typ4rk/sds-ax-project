@@ -24,17 +24,17 @@ my-pjt/
 ├── src/
 │   ├── main.py                  # CLI 진입점: 자연어 요청 1개를 받아 에이전트 실행
 │   ├── agent.py                 # 메인 에이전트 그래프 (LangGraph ReAct 루프, create_agent 활용)
-│   ├── tools.py                 # 도메인 도구: run_scan(스캔 실행), query_matches(저장된 매칭 조회)
+│   ├── tools.py                 # 도메인 도구 4개: run_scan / query_matches / suggest_patterns / collect_traffic
 │   ├── retriever.py             # SQLite 조회 헬퍼 (query_matches가 내부적으로 사용, RAG/임베딩 아님)
-│   ├── _browser.py              # (내부) Playwright 세션 생성/종료, chromePath 처리
+│   ├── _browser.py              # (내부) Playwright 세션, 페이지 방문 수집, 트래픽 기록
 │   ├── _matcher.py              # (내부) 정규식 패턴 매칭 (정규식 → 값)
 │   ├── _induce.py               # (내부) 매칭 값에서 정규식 후보 귀납 (값 → 정규식)
 │   ├── _storage.py              # (내부) SQLite 연결/저장
-│   └── _notify.py               # (내부) 매칭 즉시 콘솔 출력
+│   └── _notify.py               # (내부) 매칭 즉시 출력, 추적 출력, 수집 종료 대기
 ├── data/                        # 사용한 문서와 데이터
 │   ├── urls.txt                 # 점검 대상 URL 목록 (한 줄에 하나)
 │   ├── patterns.json            # 정규식 패턴 + 실행 설정
-│   └── scan.db                  # SQLite 저장소 (gitignore 대상)
+│   └── scan.db                  # SQLite 저장소 (scans/matches/collect, gitignore 대상)
 └── evaluation/
     ├── test_queries.csv         # 평가용 자연어 질의 목록
     └── report.md                # 평가 리포트
@@ -104,7 +104,7 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
 ```sql
 CREATE TABLE IF NOT EXISTS scans (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  source        TEXT NOT NULL,   -- 'data/urls.txt'
+  source        TEXT NOT NULL,   -- 'data\urls.txt' | 'data/scan.db#collect'
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
   urls_total    INTEGER NOT NULL,
@@ -123,11 +123,31 @@ CREATE TABLE IF NOT EXISTS matches (
   matched_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS collect (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  url           TEXT NOT NULL,
+  method        TEXT NOT NULL,
+  headers_json  TEXT,            -- 요청 헤더 dict를 JSON 문자열로
+  body          TEXT,            -- 요청 페이로드. 본문 없는 요청(GET 등)은 NULL
+  time          TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_matches_scan_id      ON matches(scan_id);
 CREATE INDEX IF NOT EXISTS idx_matches_pattern_name ON matches(pattern_name);
 CREATE INDEX IF NOT EXISTS idx_matches_url          ON matches(url);
 CREATE INDEX IF NOT EXISTS idx_matches_matched_at   ON matches(matched_at);
+
+CREATE INDEX IF NOT EXISTS idx_collect_url          ON collect(url);
+CREATE INDEX IF NOT EXISTS idx_collect_time         ON collect(time);
 ```
+
+`collect`는 `collect_traffic`이 모아 둔 **정규식을 거치지 않은 원본 요청**이다.
+`matches`가 "패턴에 걸린 것"이라면 `collect`는 "오간 것 전부"이므로, 쿠키·
+`Authorization` 헤더·POST 본문의 자격증명이 그대로 담긴다 — `matches`보다 민감하다.
+
+**주의:** `CREATE TABLE IF NOT EXISTS`는 이미 있는 테이블의 컬럼을 바꾸지 않는다.
+스키마를 고쳐도 기존 `scan.db`에는 반영되지 않아 실행 시점에 `OperationalError`로
+드러난다. 컬럼을 변경했으면 해당 테이블을 지우고 다시 만들어야 한다.
 
 ## 5. `src/retriever.py` — SQLite 조회 헬퍼
 
@@ -147,24 +167,49 @@ def find_matches(
     """
 ```
 
+함께 두는 조회 함수들 (모두 상태를 바꾸지 않는다):
+
+| 함수 | 용도 |
+|---|---|
+| `find_matches(...)` | 조건별 매칭 조회. `tools.query_matches()`가 그대로 감싼다 |
+| `find_distinct_values(...)` | 중복 없는 `matched_value` + 빈도. 정규식 귀납의 양성 표본 |
+| `find_context_texts(...)` | 정규식이 적용된 적 없는 부수 텍스트(url, detail). 후보 검증 코퍼스 |
+| `find_collected(limit)` | `collect` 테이블의 원본 요청. `urls.txt` 없이 탐지할 때의 입력 |
+
+`find_collected`는 `headers_json` 컬럼을 dict로 파싱해 **`headers` 키로 바꿔** 넘긴다.
+호출하는 쪽은 `headers_json`이 아니라 `headers`를 봐야 한다 (컬럼명과 반환 키가 다르다).
+
 - 이 파일은 순수 조회 로직만 담당 (상태 변경 없음)
-- `tools.query_matches()`가 이 함수를 감싸 에이전트에 도구로 노출한다
 
 ## 6. `src/tools.py` — 도메인 도구
 
 ```python
 def run_scan() -> dict:
-    """data/urls.txt에 저장된 URL을 순서대로 방문하며 등록된 정규식 패턴을 탐지한다.
+    """등록된 정규식 패턴을 탐지한다. 대상은 data/urls.txt 유무로 갈린다.
+
+    - urls.txt가 있으면: 그 URL을 순서대로 브라우저로 방문하며 탐지한다(기존 동작).
+    - urls.txt가 없으면: collect_traffic이 scan.db의 collect 테이블에 모아 둔
+      요청 트래픽을 대상으로 탐지한다. 브라우저를 띄우지 않으므로 네트워크가 필요 없고,
+      로그인해야 보이던 페이지의 트래픽도 수집 당시 상태 그대로 검사된다.
+
+    두 경로 모두 patterns.json 로드·검증 → 필터 → 매칭 → 즉시 출력 → scan.db 저장
+    순서를 따르며, scans 행의 source로 어느 대상을 썼는지 남긴다.
+
+    반환값은 scan_id, source, urls_total, urls_visited, status, 매칭 건수 요약,
+    method_filter를 포함한다.
+    """
+
+
+def collect_traffic(start_url: str | None = None) -> dict:
+    """브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 수집해 저장한다.
 
     내부적으로 다음을 고정 순서로 실행한다:
-    1) data/patterns.json 로드 및 검증
-    2) data/urls.txt의 각 URL을 순서대로 방문 (실패한 URL은 건너뛰고 계속)
-    3) 방문마다 네트워크/콘솔 데이터를 수집하고, filters를 통과한 것만 정규식으로 매칭
-    4) 매칭 발생 즉시 콘솔에 출력
-    5) scans/matches를 data/scan.db에 저장
+    1) 창을 띄우고(start_url이 있으면 그 페이지로) 브라우저가 보낸 요청을 모두 관찰
+    2) 사용자가 터미널에서 Enter를 누를 때까지 대기
+    3) 요청마다 url/method/헤더/본문을 data/scan.db의 collect 테이블에 즉시 저장
 
-    반환값은 에이전트가 요약에 쓸 수 있는 구조화된 결과(dict)이며,
-    scan_id, urls_total, urls_visited, status, 매칭 건수 요약, method_filter를 포함한다.
+    urls.txt를 손으로 채우는 대신 실제 브라우징을 기록해 점검 대상을 만드는 도구다.
+    urls.txt를 변경하지 않는다.
     """
 
 
@@ -217,6 +262,38 @@ def suggest_patterns(
 `tightness`는 **같은 귀납 계열 안에서만** 비교 가능하다(strict < bounded < open). 무한 반복을
 상수로 근사하므로 구조가 다른 정규식끼리 비교하면 오해를 부른다 — 채택 판단은 `coverage`와
 음성 차단율로 한다.
+
+### `run_scan`의 두 경로
+
+```
+urls.txt 있음 ──> _scan_by_visiting()  브라우저로 방문        source = data\urls.txt
+urls.txt 없음 ──> _scan_collected()    collect 테이블 재검사   source = data/scan.db#collect
+                        │
+                  둘 다 _record_chunk() 공유
+                  (필터 → 매칭 → 즉시 출력 → 저장)
+```
+
+- 두 경로가 `_record_chunk()`를 공유하므로 **필터 적용과 저장 방식이 어긋날 수 없다.**
+  `filters.methods`도 양쪽에 동일하게 걸린다 (collect 경로는 `detail.method`를 채운다)
+- collect 경로의 위치 이름도 기존 것을 재사용한다 — 헤더는 `header`, 본문은 `request_body`.
+  `detail`에는 필터용 `method`와 원본 추적용 `collect_id`가 들어간다
+- 헤더 텍스트 형식(`이름: 값` 줄 목록)은 `_browser.headers_text()` 한 곳에만 정의한다.
+  브라우저 수집과 collect 재검사가 형식이 갈리면 `(?mi)^origin:`처럼 줄 시작에 의존하는
+  정규식이 한쪽에서만 동작한다
+- `urls.txt`도 없고 `collect`도 비어 있으면 `ValueError`로 사유와 다음 할 일을 알린다
+
+### `collect_traffic`의 수집 세션
+
+- 종료 신호는 `_notify.recording_stopper()`가 만드는 판정 함수로 받는다.
+  `input()`으로 메인 흐름을 막으면 **Playwright가 이벤트를 처리하지 못해 새 탭·팝업이
+  "디버거 붙기 대기" 상태로 정지한 채 페이지가 로딩되지 않는다.** 그래서 `_pump_until()`이
+  짧게 반복 대기하며 이벤트 루프를 돌린다
+- 새 탭은 `framenavigated` 핸들러가 붙기 전에 첫 이동을 끝낼 수 있어 현재 위치도 함께 남긴다
+- 사용자가 창을 먼저 닫으면 그것도 종료 신호로 본다. 컨텍스트 기본 타임아웃을 짧게 줄여
+  30초 기다리지 않고 알아챈다
+- **로그인 세션(`storage_state`)은 저장하지 않는다.** 구현했다가 제거했다 —
+  컨텍스트의 모든 쿠키가 평문 파일 하나에 모여, 점검 대상과 무관한 메일·금융 세션까지
+  함께 노출되기 때문이다. 그 대가로 로그인 후에만 보이는 페이지는 재현되지 않는다
 
 - 이 파일이 갖는 "한 가지 역할"은 **에이전트에 노출되는 도구 함수 정의**이며,
   실제 브라우저 제어/매칭/저장/알림/조회 구현은 `_browser.py`/`_matcher.py`/`_storage.py`/`_notify.py`/`retriever.py`에 위임한다.
@@ -346,6 +423,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 | 5-x 조회 | `src/retriever.py`(`find_matches`), `tools.query_matches()` |
 | 6-x 알림 | `src/_notify.py` |
 | 7-x 패턴 도출 | `src/_induce.py`, `retriever.find_distinct_values`/`find_context_texts`, `tools.suggest_patterns()` |
+| 8-x 트래픽 수집 | `_browser.record_session()`, `_storage.save_collected()`, `collect` 테이블, `tools.collect_traffic()` |
 
 ## 11. 에러 처리 정책
 
