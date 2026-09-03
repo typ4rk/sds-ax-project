@@ -2,13 +2,14 @@
   "patterns": [
     { "name": "jwt-token", "regex": "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+" },
     { "name": "custom-secret", "regex": "sk_live_[A-Za-z0-9]{24,}" },
-    { "name": "test-any-url", "regex": "https://[a-z.]+naver\\.com" }
+    { "name": "test-any-url", "regex": "https://www\\.naver\\.com" },
+    { "name": "test-any-url-bounded", "regex": "https://(?:[a-z]+\\.)+naver\\.com(?![\\w.-])"}
   ],
   "targets": {
     "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },
     "console": true
   },
-  "filters": { "methods": ["POST"] },
+  "filters": { "methods": ["POST", "GET"] },
   "delayMs": 500,
   "browser": { "chromePath": null }
 }

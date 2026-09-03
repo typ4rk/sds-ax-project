@@ -3,4 +3,4 @@
 
 https://www.naver.com/
 https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
-
+https://finance.naver.com/

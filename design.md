@@ -27,7 +27,8 @@ my-pjt/
 │   ├── tools.py                 # 도메인 도구: run_scan(스캔 실행), query_matches(저장된 매칭 조회)
 │   ├── retriever.py             # SQLite 조회 헬퍼 (query_matches가 내부적으로 사용, RAG/임베딩 아님)
 │   ├── _browser.py              # (내부) Playwright 세션 생성/종료, chromePath 처리
-│   ├── _matcher.py              # (내부) 정규식 패턴 매칭
+│   ├── _matcher.py              # (내부) 정규식 패턴 매칭 (정규식 → 값)
+│   ├── _induce.py               # (내부) 매칭 값에서 정규식 후보 귀납 (값 → 정규식)
 │   ├── _storage.py              # (내부) SQLite 연결/저장
 │   └── _notify.py               # (내부) 매칭 즉시 콘솔 출력
 ├── data/                        # 사용한 문서와 데이터
@@ -179,6 +180,41 @@ def query_matches(
     """
 ```
 
+```python
+def suggest_patterns(
+    pattern_name: str | None = None,
+    scan_id: int | None = None,
+    min_cluster: int = 3,
+    limit: int = 1000,
+) -> dict:
+    """저장된 매칭 값의 문자 구조를 분석해 더 정확한 정규식 후보를 제안한다.
+
+    임베딩을 쓰지 않는다 — 값을 문자 클래스 시그니처로 정규화해 군집화하고, 군집의
+    공통 접두/접미를 앵커로 고정한 뒤 가변부만 일반화해 후보를 조립한다. 그런 다음
+    정규식이 적용된 적 없는 부수 텍스트(url, detail)에 돌려 추가 탐지와 회귀를 센다.
+
+    매칭이 0건인 엄격한 패턴에는 완화 사다리를 돌려 어느 축(수량자/문자클래스/구분자/
+    리터럴/스킴)이 병목인지 함께 보고한다.
+
+    data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
+    """
+```
+
+`suggest_patterns`의 고정 순서:
+
+1. `retriever.find_distinct_values()` — 중복 없는 매칭 값과 빈도 (양성 표본)
+2. `retriever.find_context_texts()` — 정규식이 적용된 적 없는 부수 텍스트 (검증 코퍼스)
+3. `_induce.cluster_by_shape()` → `_induce.induce_regex()` — 군집화 후 strict/open/bounded 3변형 귀납
+4. `_induce.evaluate_candidate()` — coverage / gained / lost / 합성 음성 차단율 계산
+5. 채택 게이트 통과분만 정렬해 반환
+
+**채택 게이트**: 기존 패턴이 잡던 값을 놓치지 않을 것(`lost` 없음), 컴파일될 것,
+중첩 수량자가 없을 것(ReDoS). 정렬은 `gained` 내림차순 → 음성 차단율 내림차순 → 길이 오름차순.
+
+`tightness`는 **같은 귀납 계열 안에서만** 비교 가능하다(strict < bounded < open). 무한 반복을
+상수로 근사하므로 구조가 다른 정규식끼리 비교하면 오해를 부른다 — 채택 판단은 `coverage`와
+음성 차단율로 한다.
+
 - 이 파일이 갖는 "한 가지 역할"은 **에이전트에 노출되는 도구 함수 정의**이며,
   실제 브라우저 제어/매칭/저장/알림/조회 구현은 `_browser.py`/`_matcher.py`/`_storage.py`/`_notify.py`/`retriever.py`에 위임한다.
 
@@ -205,7 +241,8 @@ def build_agent():
     )
 ```
 
-- `SYSTEM_PROMPT`는 모듈 상수로 두며, 위 요약 지침에 더해 **점검한 URL 수·매칭 건수·패턴별/위치별 분포·건너뛴 URL을 요약에 포함**하고 **매칭된 값 자체는 요약에 그대로 옮기지 않을 것**을 지시한다. 콘솔의 `[MATCH]` 줄은 값을 그대로 출력하지만([verification.md](verification.md) 6-6), LLM 요약은 건수·분포만 다루게 해 값이 두 번 노출되지 않게 한다
+- `SYSTEM_PROMPT`는 모듈 상수로 두며, **점검한 URL 수·매칭 건수·패턴별/위치별 분포·건너뛴 URL을 요약에 포함**할 것을 지시한다. 값 자체는 `[MATCH]` 줄과 DB에 그대로 남으므로([verification.md](verification.md) 6-6) 요약에서 따로 가리지 않는다
+- 패턴 개선 요청에는 `suggest_patterns`를 호출하되, **도구가 돌려준 `candidates` 밖의 정규식을 새로 지어내지 말 것**을 명시한다. LLM은 후보를 고르고·이름 붙이고·위험도를 설명하는 편집자 역할이며, 정규식의 저자가 아니다 (검증 불가능한 환각이 탐지 규칙이 되는 것을 막는다)
 - `_required_env(name)`로 필수 환경변수를 읽어, 값이 없으면 무엇이 빠졌는지 알리는 `RuntimeError`를 던진다 (`main.py`가 이를 잡아 `[ERROR]`로 출력)
 - ReAct 루프: LLM이 요청을 보고 `run_scan`/`query_matches` 중 무엇을, 몇 번 호출할지 스스로 판단 (`create_agent`가 이 루프를 LangGraph 그래프로 컴파일)
 - 도구 내부(수집→탐지→저장, 조회)의 순서는 고정이며 LLM이 그 세부 단계를 정하지 않음
@@ -298,6 +335,7 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 | 4-x 저장 | `src/_storage.py`, `scans`/`matches` 스키마 |
 | 5-x 조회 | `src/retriever.py`(`find_matches`), `tools.query_matches()` |
 | 6-x 알림 | `src/_notify.py` |
+| 7-x 패턴 도출 | `src/_induce.py`, `retriever.find_distinct_values`/`find_context_texts`, `tools.suggest_patterns()` |
 
 ## 11. 에러 처리 정책
 

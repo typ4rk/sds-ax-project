@@ -6,12 +6,15 @@ _browser.py / _matcher.py / _storage.py / _notify.py / retriever.py에 위임한
 """
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
-from src import _browser, _matcher, _notify, _storage, retriever
+from src import _browser, _induce, _matcher, _notify, _storage, retriever
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# suggest_patterns가 한 패턴에 대해 돌려줄 최대 후보 수.
+MAX_CANDIDATES = 5
 URLS_PATH = DATA_DIR / "urls.txt"
 PATTERNS_PATH = DATA_DIR / "patterns.json"
 
@@ -125,6 +128,152 @@ def query_matches(
         scan_id=scan_id,
         limit=limit,
     )
+
+
+def suggest_patterns(
+    pattern_name: str | None = None,
+    scan_id: int | None = None,
+    min_cluster: int = 3,
+    limit: int = 1000,
+) -> dict:
+    """저장된 매칭 값의 문자 구조를 분석해 더 정확한 정규식 후보를 제안한다.
+
+    임베딩을 쓰지 않는다 — 값을 문자 클래스 시그니처로 정규화해 군집화하고, 군집의
+    공통 접두/접미를 앵커로 고정한 뒤 가변부만 일반화해 후보를 조립한다. 그런 다음
+    정규식이 적용된 적 없는 부수 텍스트(url, detail)에 돌려 추가 탐지와 회귀를 센다.
+
+    매칭이 0건인 엄격한 패턴에는 완화 사다리를 돌려 어느 축(수량자/문자클래스/구분자/
+    리터럴/스킴)이 병목인지 함께 보고한다.
+
+    data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
+    """
+    config = _load_config()
+    patterns = _matcher.compile_patterns(config.get("patterns", []))
+    corpus = retriever.find_context_texts(scan_id)
+
+    targets = [(n, rx) for n, rx in patterns if not pattern_name or n == pattern_name]
+    if not targets:
+        raise ValueError(f"patterns.json에 없는 패턴 이름입니다: {pattern_name}")
+
+    report = []
+    for name, regex in targets:
+        rows = retriever.find_distinct_values(
+            pattern_name=name, scan_id=scan_id, limit=limit
+        )
+        values = [row["matched_value"] for row in rows]
+        others = [rx for other, rx in patterns if other != name]
+        entry = {
+            "pattern_name": name,
+            "current_regex": regex.pattern,
+            "distinct_values": len(values),
+            "total_hits": sum(row["hits"] for row in rows),
+            "candidates": [],
+            "relaxations": [],
+            "only_this_pattern_catches": [],
+        }
+
+        if values:
+            # 다른 패턴이 하나도 잡지 못한 값 = 이 패턴을 지우면 놓치게 될 값.
+            # (이 패턴이 "놓친" 값이 아니다 — 이름을 헷갈리면 정반대로 읽힌다.)
+            entry["only_this_pattern_catches"] = [
+                value for value in values if not any(o.search(value) for o in others)
+            ]
+            entry["candidates"], rejected = _build_candidates(
+                values, regex.pattern, corpus, min_cluster
+            )
+            if not entry["candidates"]:
+                entry["note"] = _no_candidate_note(values, rejected, min_cluster)
+        else:
+            entry["relaxations"] = _build_relaxations(regex.pattern, corpus)
+            entry["note"] = (
+                "매칭이 0건이라 귀납할 표본이 없어 정규식을 축별로 완화해 보았습니다."
+                if entry["relaxations"]
+                else "매칭이 0건이며, 어느 축을 풀어도 코퍼스에서 매칭이 생기지 않았습니다."
+                " 이 패턴이 노리는 값이 실제로 없거나, 수집 대상(targets)이 좁은 것입니다."
+            )
+        report.append(entry)
+
+    return {
+        "patterns": report,
+        "corpus_size": len(corpus),
+        "note": "제안만 반환하며 data/patterns.json은 변경되지 않았습니다.",
+    }
+
+
+def _no_candidate_note(values: list[str], rejected: int, min_cluster: int) -> str:
+    """후보가 하나도 안 남은 이유를 표본 부족과 게이트 탈락으로 구분해 설명한다."""
+    if rejected:
+        return (
+            f"후보 {rejected}개를 만들었지만 모두 탈락했습니다. 서로 다른 값이"
+            f" {len(values)}개뿐이라 과적합한 정규식이 나왔고, 기존 패턴이 잡던 값을"
+            " 놓치기 때문입니다(회귀). 값을 더 모은 뒤 다시 시도하세요."
+        )
+    return (
+        f"서로 다른 값이 {len(values)}개뿐이라 일반화할 수 없습니다"
+        f" (군집당 최소 {min_cluster}개 필요). 더 모은 뒤 다시 시도하세요."
+    )
+
+
+def _build_candidates(
+    values: list[str], baseline: str, corpus: list[str], min_cluster: int
+) -> tuple[list[dict], int]:
+    """군집별로 후보를 만들고 채택 게이트를 통과한 것만 정렬해 돌려준다.
+
+    게이트: 기존 패턴이 잡던 것을 놓치지 않을 것(lost 없음), 컴파일될 것,
+    중첩 수량자가 없을 것(ReDoS 위험). 통과 목록과 탈락 개수를 함께 돌려준다.
+    """
+    accepted: list[dict] = []
+    rejected = 0
+    for signature, members in _induce.cluster_by_shape(values).items():
+        for cand in _induce.induce_regex(members, min_cluster=min_cluster):
+            negatives = _induce.synthetic_negatives(cand["prefix"], cand["suffix"])
+            score = _induce.evaluate_candidate(
+                cand["regex"], members, corpus, baseline, negatives
+            )
+            if not score["compiles"] or score["lost"] or score["redos_risk"]:
+                rejected += 1
+                continue
+            accepted.append(
+                {
+                    "variant": cand["variant"],
+                    "regex": cand["regex"],
+                    "signature": signature,
+                    "support": cand["support"],
+                    "lcs_len": cand["lcs_len"],
+                    "tightness": cand["tightness"],
+                    "samples": cand["samples"],
+                    "coverage": score["coverage"],
+                    "gained": score["gained"],
+                    "negative_block_rate": score["negative_block_rate"],
+                }
+            )
+    accepted.sort(
+        key=lambda c: (
+            -len(c["gained"]),
+            -(c["negative_block_rate"] or 0),
+            len(c["regex"]),
+        )
+    )
+    return accepted[:MAX_CANDIDATES], rejected
+
+
+def _build_relaxations(baseline: str, corpus: list[str]) -> list[dict]:
+    """매칭 0건인 패턴을 축별로 완화해, 매칭이 생기는 축을 병목으로 지목한다."""
+    found = []
+    for variant in _induce.relax_regex(baseline):
+        hits = [text for text in corpus if re.search(variant["regex"], text)]
+        if hits:
+            found.append(
+                {
+                    "axes": variant["axes"],
+                    "regex": variant["regex"],
+                    "unlocked_count": len(hits),
+                    "unlocked": hits[:3],
+                }
+            )
+    # 축을 적게 풀고도 매칭이 생긴 쪽이 더 정확한 원인 지목이다.
+    found.sort(key=lambda v: (len(v["axes"]), -v["unlocked_count"]))
+    return found[:MAX_CANDIDATES]
 
 
 def _load_config() -> dict:

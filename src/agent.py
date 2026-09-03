@@ -14,13 +14,22 @@ SYSTEM_PROMPT = (
     "요약해 설명하는 보조자입니다. 사용자의 요청을 보고 새로 점검이 필요하면 "
     "run_scan을, 기존 결과 확인이면 query_matches를 호출하세요. 실제 수집·탐지· "
     "저장 로직은 도구 내부에서 고정된 순서로 실행되므로 임의로 추측해 설명하지 마세요. "
-    "요약에는 점검한 URL 수, 매칭 건수, 패턴별/위치별 분포, 건너뛴 URL을 포함합니다."
+    "요약에는 점검한 URL 수, 매칭 건수, 패턴별/위치별 분포, 건너뛴 URL을 포함합니다. "
+    "패턴이 너무 넓게/좁게 잡힌다거나 놓치는 게 있는지 묻는 요청이면 suggest_patterns를 "
+    "호출하세요. 이때 도구가 돌려준 candidates 목록 밖의 정규식을 새로 지어내지 말고, "
+    "그중에서 고르고 이름을 붙이고 위험도를 설명하는 일만 하세요. 이 도구는 제안만 하며 "
+    "설정을 바꾸지 않는다는 점을 반드시 밝히세요. "
+    "run_scan은 브라우저를 새로 띄워 외부 사이트에 접속하는 무거운 작업입니다. "
+    "사용자가 새 점검을 명시적으로 요청할 때만 호출하세요. 이미 저장된 결과를 분석하는 "
+    "요청(왜 안 잡히는지, 패턴이 적절한지, 무엇이 발견됐는지)에는 run_scan을 부르지 말고 "
+    "query_matches나 suggest_patterns로 답하세요. 저장된 데이터가 부족하면 스스로 "
+    "재점검하지 말고, 재점검이 필요하다는 사실을 사용자에게 알리고 판단을 맡기세요."
 )
 
 
 def build_agent():
     """Bedrock 모델과 도구를 연결한 패턴 탐지 에이전트를 생성한다."""
-    from src.tools import query_matches, run_scan
+    from src.tools import query_matches, run_scan, suggest_patterns
 
     model = ChatBedrockConverse(
         model=_required_env("BEDROCK_MODEL_ID"),
@@ -29,7 +38,7 @@ def build_agent():
 
     return create_agent(
         model=model,
-        tools=[run_scan, query_matches],
+        tools=[run_scan, query_matches, suggest_patterns],
         system_prompt=SYSTEM_PROMPT,
     )
 
