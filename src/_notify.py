@@ -14,6 +14,8 @@ TRACE_ENV = "SCAN_TRACE"
 PREVIEW_CHARS = 300
 # [MATCH] 줄에 싣는 detail의 최대 길이 (verification.md 6-2)
 DETAIL_CHARS = 200
+# [MATCH] 줄에 싣는 context의 최대 길이. _matcher가 앞뒤 40자씩 남기므로 넉넉히 잡는다.
+CONTEXT_CHARS = 200
 
 
 def notify_match(match: dict) -> None:
@@ -21,15 +23,19 @@ def notify_match(match: dict) -> None:
 
     다음 URL 처리로 넘어가기 전에 출력되어야 하므로 즉시 flush한다.
     matched_value는 자르지 않고 원본 그대로 싣는다(값 노출 정책, verification.md 6-6).
-    detail은 길어질 수 있어 DETAIL_CHARS까지만 싣는다.
+    context는 매칭된 값이 실제로 어떤 문장 안에 있었는지 보여주며, detail에서 꺼내
+    별도 필드로 낸다 — detail 안에 두면 page_url이 길 때 DETAIL_CHARS에 잘려 사라진다.
     url은 매칭된 값이 아니라 값이 발견된 리소스 URL이다(verification.md 3-2).
     """
+    detail = dict(match.get("detail") or {})
+    context = detail.pop("context", "")
     print(
-        f"[MATCH] pattern={match['pattern_name']}"        
+        f"[MATCH] pattern={match['pattern_name']}"
         f"|location={match['location']}"
         f"|matched_value={_one_line(match['matched_value'])}"
-        f"|url={match['url']}"        
-        f"|detail={_clip(match.get('detail') or {}, DETAIL_CHARS)}",
+        f"|url={match['url']}"
+        f"|context={_clip(context, CONTEXT_CHARS)}"
+        f"|detail={_clip(detail, DETAIL_CHARS)}",
         flush=True,
     )
 

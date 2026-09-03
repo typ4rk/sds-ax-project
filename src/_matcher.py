@@ -5,6 +5,9 @@
 
 import re
 
+# 매칭된 자리의 앞뒤로 얼마나 문맥을 남길지 (한쪽 기준 글자 수).
+CONTEXT_CHARS = 40
+
 
 class PatternError(ValueError):
     """patterns.json의 패턴 정의가 잘못되었을 때 발생한다."""
@@ -51,6 +54,10 @@ def scan_text(
 
     매칭된 값은 가공 없이 원본 그대로 담는다. 같은 위치에서 동일한 값이 여러 번
     나오면 1건으로 합친다(중복 저장 방지).
+
+    매칭마다 detail에 context를 넣는다. matched_value만으로는 그 값이 어떤 문장 안에
+    있었는지 알 수 없어서다 — 예를 들어 '"origin"'만 봐서는 어떤 키의 값이 무엇인지
+    알 수 없다. detail은 덩어리 전체가 공유하는 dict이므로 매칭마다 복사해서 넣는다.
     """
     if not text:
         return []
@@ -69,7 +76,20 @@ def scan_text(
                     "matched_value": value,
                     "location": location,
                     "url": url,
-                    "detail": detail,
+                    "detail": {**detail, "context": _context_of(text, hit)},
                 }
             )
     return found
+
+
+def _context_of(text: str, hit: re.Match) -> str:
+    """매칭된 자리의 앞뒤를 CONTEXT_CHARS만큼 잘라 문맥으로 만든다.
+
+    잘린 쪽에는 '...'을 붙여 앞뒤가 더 있음을 표시한다. 원본을 그대로 담으므로
+    줄바꿈이 섞일 수 있고, 콘솔 출력에서만 한 줄로 접는다(_notify).
+    """
+    start = max(0, hit.start() - CONTEXT_CHARS)
+    end = min(len(text), hit.end() + CONTEXT_CHARS)
+    head = "..." if start > 0 else ""
+    tail = "..." if end < len(text) else ""
+    return f"{head}{text[start:end]}{tail}"

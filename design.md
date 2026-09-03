@@ -87,12 +87,15 @@ https://nid.naver.com/nidlogin.login?mode=form&url=https://www.naver.com/
 - 지정하면 `detail.method`가 그 목록에 있는 수집 항목만 매칭한다. 대소문자는 무시한다
 - `method`는 **요청** 항목(요청 헤더, 요청 페이로드)에만 붙으므로, 필터를 켜면
   응답 헤더·응답 바디·쿠키·콘솔은 함께 제외된다. "나가는 데이터만 검사"할 때 쓴다
-- 키를 지우면 필터 없이 수집된 전부를 매칭한다 (기본)
+- **값을 지정하지 않으면 수집된 전부를 매칭한다 (기본).** 네 가지가 모두 같은 뜻이다 —
+  `filters` 키 자체가 없거나, `filters: {}`이거나, `methods: []`이거나, `methods: null`.
+  필터를 잠시 끌 때 키를 지웠다 되살리는 것보다 `[]`로 비우는 편이 편하기 때문이다
 
 검증 규칙:
 - `patterns[].name` 중복 불가, `regex`는 로드 시 `re.compile(...)`로 컴파일 검증 (실패 시 이름과 함께 에러)
 - `targets`에 켜진 수집 대상이 하나도 없으면 스캔 시작 전에 실패한다
-- `filters.methods`는 문자열 배열이어야 하며, 빈 배열이면 실패한다 (필터를 쓰지 않으려면 키를 지운다)
+- `filters.methods`는 문자열 배열이어야 한다. 문자열이나 숫자를 그대로 넣으면 실패한다
+  (오타를 조용히 넘기면 필터가 통째로 무력화되기 때문). 빈 배열은 "제한 없음"으로 읽는다
 - `delayMs`는 0 이상의 숫자여야 한다
 - `browser.chromePath`가 `null`이면 Playwright 관리 Chromium 사용, 문자열이면 그 경로를 `executable_path`로 사용
 
@@ -281,11 +284,18 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 
 1. **즉시 출력 (도구 실행 중)**: `run_scan` 실행 중 매칭 발생 시 다음 형태로 즉시 콘솔 출력
    ```
-   [MATCH] pattern=test-any-url location=header url=https://ssl.pstatic.net/tveta/libs/glad/res/r.html matched_value=https://nid.naver.com detail={'page_url': 'https://nid.naver.com/nidlogin.login?mode=form', 'direction': 'request', 'method': 'GET'}
+   [MATCH] pattern=origin_body|location=body|matched_value="origin"|url=https://www.naver.com/|context=..."utf-8"> <meta name="Referrer" content="origin"> <meta http-equiv="X-UA-Compat...|detail={'page_url': 'https://www.naver.com/', 'status': 200}
    ```
-   `url`은 매칭된 값이 아니라 **값이 발견된 리소스 URL**이고, 실제로 패턴에 걸린 값은
-   `matched_value`다 (`detail.page_url`은 방문한 페이지). `matched_value`는 원본 그대로,
-   `detail`은 200자까지만 싣는다 ([verification.md](verification.md) 6-2, 6-6)
+   필드는 `|`로 구분한다. `url`은 매칭된 값이 아니라 **값이 발견된 리소스 URL**이고,
+   실제로 패턴에 걸린 값은 `matched_value`다 (`detail.page_url`은 방문한 페이지).
+   `matched_value`는 원본 그대로 싣고, `context`와 `detail`은 각각 200자까지 싣는다
+   ([verification.md](verification.md) 6-2, 6-6)
+
+   `context`는 매칭 자리 앞뒤 40자(`_matcher.CONTEXT_CHARS`)로, `matched_value`만으로는
+   그 값이 어떤 문장 안에 있었는지 알 수 없어서 넣는다 — 위 예에서 `"origin"`이 유출이
+   아니라 HTML 메타 태그의 값이라는 것이 문맥으로 드러난다. `detail`에 함께 저장하되
+   출력에서는 꺼내어 별도 필드로 낸다. `detail` 안에 두면 `page_url`이 길 때 200자
+   제한에 잘려 사라지기 때문이다 ([verification.md](verification.md) 3-7, 6-7)
 2. **추적 출력 (디버깅용, 기본 꺼짐)**: `SCAN_TRACE=1`이면 `visit`이 넘긴 수집 덩어리를
    매칭 여부와 함께 표준에러로 출력한다. 매칭 0건일 때 **수집이 안 된 것**인지
    **패턴이 안 맞은 것**인지 구분하기 위한 것이다. 수집 원본이 그대로 찍히므로 기본은 꺼져 있다

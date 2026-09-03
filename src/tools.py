@@ -310,10 +310,14 @@ def _check_targets(targets: dict) -> None:
 
 
 def _method_filter(filters: dict) -> set[str] | None:
-    """filters.methods를 대문자 집합으로 돌려준다. 지정이 없으면 None(필터 없음).
+    """filters.methods를 대문자 집합으로 돌려준다. 값을 지정하지 않으면 None(필터 없음).
 
     None이면 수집된 모든 항목을 매칭한다. 집합이면 detail.method가 그 안에 있는 항목만
     매칭하므로, method가 없는 수집 항목(응답 헤더/바디/쿠키/콘솔)은 함께 제외된다.
+
+    "값을 지정하지 않은" 경우는 셋 다 같은 뜻으로 본다 — filters 키 자체가 없거나,
+    methods 키가 없거나, methods가 빈 배열(`[]`)이거나. 셋 다 전체를 검사한다.
+    필터를 잠시 끄려고 `[]`로 비우는 것이 키를 지웠다 되살리는 것보다 편하기 때문이다.
     """
     raw = filters.get("methods")
     if raw is None:
@@ -321,12 +325,8 @@ def _method_filter(filters: dict) -> set[str] | None:
     if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
         raise ValueError(f"filters.methods는 문자열 배열이어야 합니다: {raw!r}")
     methods = {str(item).strip().upper() for item in raw if str(item).strip()}
-    if not methods:
-        raise ValueError(
-            "filters.methods가 비어 있습니다. 필터를 쓰지 않으려면 키를 지우세요:"
-            f" {PATTERNS_PATH}"
-        )
-    return methods
+    # 빈 배열은 "제한 없음"으로 읽는다 (빈 문자열만 든 배열도 마찬가지).
+    return methods or None
 
 
 def _check_delay(delay_ms) -> None:
