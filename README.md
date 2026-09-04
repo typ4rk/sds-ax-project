@@ -1,27 +1,30 @@
-# 브라우저 트래픽 분석 Agent — 도구 안내
+# 브라우저 트래픽 분석 Agent
 
-## 실행
+## 1. 실행
 
 ```bash
 python -m src.main "<자연어 요청>"     # 1회 실행
-python -m src.main                    # 인자 없으면 대화형
+python -m src.main                   # 인자 없으면 대화형
 ```
 
 준비가 안 됐으면 [design.md](design.md) 8절의 "준비 (최초 1회)"를 먼저 따른다
-(`pip install -r requirements.txt` → `playwright install chromium` → `.env` 채우기).
+```bash
+pip install -r requirements.txt
+playwright install chromium          # .env 채우기
+```
 
-## 출력 스트림
+## 2. 출력
 
 | 스트림 | 내용 |
 |---|---|
 | 표준출력 | `[MATCH]` 줄과 에이전트 최종 응답 |
-| 표준에러 | `[usage]`, `[GUARD]`, `[RECORD]`·`[TRACE]`·`[INDUCE]` 진행 알림 |
+| 표준에러 | `[USAGE]`, `[GUARD]`, `[RECORD]`·`[TRACE]`·`[INDUCE]` 진행 알림 |
 
-`[usage]`는 실행마다 한 줄 나온다. 도구 결과 글자 수를 함께 싣는 이유는 그 결과가
+`[USAGE]`는 실행마다 한 줄 나온다. 도구 결과 글자 수를 함께 싣는 이유는 그 결과가
 다음 LLM 호출의 입력이 되기 때문이다.
 
 ```
-[usage] llm=2 input=11,404 output=183 total=11,587 | tools: detect_matches(1,204자)
+[USAGE] llm=2 input=11,404 output=183 total=11,587 | tools: detect_matches(1,204자)
 ```
 
 `[GUARD]`는 수집한 트래픽에 지시문이 심겨 있을 때 나온다. **결과를 바꾸지는 않는다** —
@@ -40,7 +43,8 @@ python -m src.main                    # 인자 없으면 대화형
 
 둘 다 원본 값이 노출되므로 평소에는 비워 둔다.
 
-## 도구 4개 한눈에
+
+## 3. 도구 소개
 
 | 도구 | 한 줄 요약 | 브라우저 | DB |
 |---|---|---|---|
@@ -49,9 +53,10 @@ python -m src.main                    # 인자 없으면 대화형
 | `suggest_patterns` | 더 정확한 정규식 후보를 제안한다 (설정은 바꾸지 않는다) | 안 씀 | 읽기 |
 | `collect_traffic` | 직접 둘러보는 동안 오간 요청 트래픽을 모아 저장한다 | **띄움** | 쓰기 |
 
+
 ---
 
-## `detect_matches()`
+## 3-1. `detect_matches()`
 
 > `collect` 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
@@ -77,14 +82,15 @@ python -m src.main                    # 인자 없으면 대화형
 ```
 "수집된 트래픽에서 개인정보 유출 있는지 확인해줘"
 "지금 바로 다시 검사해줘"
-"저장된 결과 말고 새로 확인해줘"
+"점검하고 결과까지 정리해서 알려줘"
 ```
+
 
 ---
 
-## `query_matches(...)`
+## 3-2. `query_matches(...)`
 
-> 저장된 매칭 기록을 조건에 맞게 조회한다.
+> 저장된 매칭 기록(결과)을 조건에 맞게 조회한다.
 
 | 파라미터 | 기본 | 의미 |
 |---|---|---|
@@ -101,6 +107,7 @@ python -m src.main                    # 인자 없으면 대화형
 
 `url`은 매칭된 값이 아니라 **값이 발견된 리소스 URL**이다. 실제로 걸린 값은
 `matched_value`, 방문한 페이지는 `detail.page_url`, 그 값이 있던 문장은 `detail.context`다.
+
 
 `matched_value`와 `detail` 안의 같은 값은 **모델에게 갈 때만** 형식 보존 치환된다
 (숫자 → `0`, 글자 → `X`, 구분자는 유지). DB와 `[MATCH]` 줄에는 원본이 그대로 남는다.
@@ -126,9 +133,10 @@ eyJhbGciOiJIUzI1NiJ9.eyJz  →  XXXXXXXXXXXXXXX0XXX0.XXXX
 `location` 필터는 도구 인자에 없다. "헤더에서 발견된 것만"처럼 물으면 조회 후
 응답에서 걸러 설명한다.
 
+
 ---
 
-## `suggest_patterns(...)`
+## 3-3. `suggest_patterns(...)`
 
 > 정규식 후보를 제안한다. 분석 대상은 `source`로 고른다.
 
@@ -141,7 +149,8 @@ eyJhbGciOiJIUzI1NiJ9.eyJz  →  XXXXXXXXXXXXXXX0XXX0.XXXX
 | `limit` | `1000` | 읽을 행 수. `source="collect"`면 **본문 있는 행만** 센다 |
 | `pattern_name`, `scan_id` | `None` | `source="matches"`에서만 쓰인다 |
 
-### `source="matches"` — 쓰던 정규식을 다듬는다
+
+### 1) `source="matches"` — 변경 추천 (기존 정의된 패턴 대상)
 
 이미 그 패턴에 **걸린 값들**을 분석한다. 두 방향으로 일한다.
 
@@ -167,7 +176,8 @@ sk_live_[A-Za-z0-9]{24,} → 0건
 
 `corpus_size`는 **검증에 쓴 부수 텍스트 수**이며 `collect` 테이블과 무관하다.
 
-### `source="collect"` — 아직 안 잡힌 값에서 새 패턴을 찾는다
+
+### 2) `source="collect"` — 신규 추천 (새로운 패턴 추천)
 
 `collect` 테이블을 분석한다. 본문을 통째로 귀납하면 의미 있는 정규식이
 나오지 않으므로, JSON에서 **같은 키끼리 값을 모아** 키별로 귀납한다.
@@ -222,9 +232,10 @@ suggest_patterns(column="content", json_key="sectionId")
 "collect 테이블 content 컬럼에서 sectionId 찾는 패턴 만들어줘"   → column=content, json_key=sectionId
 ```
 
+
 ---
 
-## `collect_traffic(start_url=None)`
+## 3-4. `collect_traffic(start_url=None)`
 
 > 브라우저를 띄워 사용자가 직접 둘러보는 동안 오간 요청 트래픽을 수집해 저장한다.
 
@@ -262,18 +273,40 @@ suggest_patterns(column="content", json_key="sectionId")
 
 이후 `detect_matches`을 부르면 모아 둔 트래픽을 대상으로 탐지한다. 사람 개입이 필요 없다.
 
+
 ---
 
-## 주의할 점
+## 4. 주의할 점
 
 **`collect` 테이블은 `matches`보다 민감하다.** 정규식을 거치지 않은 원본 요청이라
 쿠키·`Authorization` 헤더·POST 본문의 자격증명이 그대로 담긴다. `data/scan.db`는
 `.gitignore` 대상이지만 파일 자체는 로컬에 남는다.
 
-**로그인 세션은 저장하지 않는다.** 구현했다가 제거했다 — `storage_state()`가 컨텍스트의
-모든 쿠키를 내보내 점검 대상과 무관한 메일·금융 세션까지 평문 파일 하나에 모이기 때문이다.
-그래서 로그인해야 보이는 페이지는 `collect_traffic` 중에만 관찰되고 `detect_matches` 재현 시에는
-비로그인 상태로 접근한다.
-
 **`[MATCH]` 줄은 매칭된 값을 그대로 출력한다** ([verification.md](verification.md) 6-5).
 표준출력으로 나가므로 파이프·리다이렉트 시 값이 파일에 남는다.
+
+
+---
+
+## 5. 회고 (Try-and-error)
+
+### 설계 변경
+최초 "URL 목록 파일을 제시하고 에이전트가 자동으로 순회하여 지정된 패턴을 확인" 하는 방향으로 개발하려고 하였으나,
+웹 페이지 이동 과정에서 로그인이 필요한 페이지 접근에 대한 데이터 수집을 자동화하기 어렵다는 판단으로 아래와 같이 설계를 변경하였다.
+=> Playwright 실행 후 로그인 시 웹 사이트 경고(또는 거절) 발생. 비밀번호를 바꾸는 등의 별도 과정 요구 (로그인 세션 유지 안됨)
+
+### 기능 분리
+- Playwright 를 이용해 웹 브라우저를 직접 순회하면서 데이터 수집 후 DB 보관
+- 수집된 데이터에 대한 기존 패턴 분석 또는 신규 패턴 도출
+
+### 문제점 도출 및 수정
+
+1) 로그인 과정에서 쿠키, 토큰, 개인정보 등이 DB 에 남는 문제 보완
+- 마스킹 대상 패턴 여부 추가 (patterns.json: masking)
+- 미들웨어 추가 (=> )LLM 에 개인정보로 보이는 경우 마스킹 전송하도록 함)
+- 해당 패턴인 경우 형식만 보존 후 치환 (숫자→0, 글자→X)
+
+2) 자연어 요청을 파라미터로 못 받던 문제
+수집된 DB 에 대해 기존 패턴 및 신규 패턴 추천을 처리할 경우, 자연어로 특정 테이블(또는 컬럼) 조건에 대해 SQL 조회를 통해 원본 데이터를 1차 처리한 후 LLM 에서 처리하도록 함 
+- 엉뚱한 행까지 귀납 제거 
+- 값 종류가 적은 키가 상위 후보 컷에 잘려 사라지는 문제 제거 (키를 지목한 요청은 후보를 자르지 않도록 예외를 둠)

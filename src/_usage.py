@@ -111,7 +111,7 @@ class UsageTracer(BaseCallbackHandler):
             parts.append(f"{name}({chars:,}자)")
         tools = ", ".join(parts) if parts else "없음"
         return (
-            f"[usage] llm={self.llm_calls} input={self.input_tokens:,}\n"
+            f"[USAGE] llm={self.llm_calls} input={self.input_tokens:,}\n"
             f" output={self.output_tokens:,} total={total:,} | tools: {tools}"
         )
 
