@@ -2,8 +2,10 @@
   "patterns": [
     { "name": "jwt-token", "regex": "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+" },
     { "name": "custom-secret", "regex": "sk_live_[A-Za-z0-9]{24,}" },
-    { "name": "origin_header", "regex": "(?mi)(^origin:\\s*\\S*)"},
-    { "name": "origin_body", "regex": "(?mi)(\"origin\")"}
+    { "name": "personal-code", "regex": "\\d{6}-[1-4]\\d{6}"},
+    { "name": "personal-tel", "regex": "010-\\d{3,4}-\\d{4}"},
+    { "name": "credit-card", "regex": "\\d{4}-\\d{4}-\\d{4}-\\d{4}"},
+    { "name": "origin-body", "regex": "(?mi)(\"origin\")"}
   ],
   "targets": {
     "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },

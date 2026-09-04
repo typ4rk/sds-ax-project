@@ -106,7 +106,7 @@ def save_collected(
     """수집 덩어리 1건을 collect 테이블에 저장한다.
 
     _browser의 emit(위치, 텍스트, URL, 부가정보)과 같은 모양으로 받는다. 그래서
-    수집 경로와 저장 형식이 어긋날 수 없고, 나중에 run_scan이 그대로 되돌려 검사한다.
+    수집 경로와 저장 형식이 어긋날 수 없고, 나중에 detect_matches가 그대로 되돌려 검사한다.
 
     matches와 달리 정규식 매칭을 거치지 않은 원본이다. location은 matches와 같은
     어휘를 쓴다: header / body / request_body / cookie / console.

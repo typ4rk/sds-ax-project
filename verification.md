@@ -6,7 +6,7 @@
 
 ## 사용법
 
-- 각 항목은 `python -m src.main`을 통하지 않고 도구 함수(`src.tools.run_scan`,
+- 각 항목은 `python -m src.main`을 통하지 않고 도구 함수(`src.tools.detect_matches`,
   `src.tools.query_matches`)를 직접 호출해서 확인할 수 있다. LLM 응답 품질과 무관하게
   수집·탐지·저장·조회·알림이 맞는지 보는 것이 목적이다.
 - 판정은 **Pass / Fail / N/A** 셋 중 하나로 적는다. 확인하지 못한 항목은 Fail이 아니라
@@ -55,8 +55,8 @@
 | 2-7 | 다중 패턴 동시 적용 | 서로 다른 두 패턴에 걸리는 값을 한 페이지에 심음 | 패턴별로 각각 탐지된다 |
 | 2-8 | 설정 파일 부재 | patterns.json 삭제 후 실행 | 경로를 알려주며 실패한다 |
 | 2-9 | method 필터 적용 | `filters.methods: ["POST"]`로 두고 GET·POST가 섞인 페이지 방문 | `detail.method`가 POST인 항목만 매칭된다. GET 요청과 `method`가 없는 항목(응답 헤더·바디·쿠키·콘솔)은 모두 제외된다 |
-| 2-11 | collect 기준 탐지 | collect에 행이 있는 상태로 `run_scan()` | 브라우저를 띄우지 않고 저장된 덩어리를 검사한다. `source`가 `data/scan.db#collect`이고 `chunks_total`이 collect 행 수와 같다 |
-| 2-12 | 대상 없음 | collect를 비운 뒤 `run_scan()` | 사유와 다음 할 일(`collect_traffic` 먼저 실행)을 담은 `ValueError`로 실패한다 |
+| 2-11 | collect 기준 탐지 | collect에 행이 있는 상태로 `detect_matches()` | 브라우저를 띄우지 않고 저장된 덩어리를 검사한다. `source`가 `data/scan.db#collect`이고 `chunks_total`이 collect 행 수와 같다 |
+| 2-12 | 대상 없음 | collect를 비운 뒤 `detect_matches()` | 사유와 다음 할 일(`collect_traffic` 먼저 실행)을 담은 `ValueError`로 실패한다 |
 | 2-10 | method 필터 미설정 | `filters` 키 삭제 / `filters: {}` / `methods: []` / `methods: null` 네 가지로 각각 실행 | 네 경우 모두 수집된 전부를 매칭하고 반환값 `method_filter`가 `null`이다. 빈 배열은 에러가 아니다 |
 
 ## 3. 매칭 기록
@@ -85,7 +85,7 @@
 | 4-4 | 예외 시에도 상태 정리 | 스캔 도중 강제로 예외 발생 | `scans.status`가 `running`으로 남지 않는다 |
 | 4-5 | 스캔-매칭 연결 | 두 번 연속 스캔 후 조회 | 각 매칭의 `scan_id`가 자기 스캔의 id를 가리킨다 |
 | 4-6 | 누적 저장 | 같은 DB에 스캔을 두 번 실행 | 이전 스캔의 매칭이 지워지지 않고 함께 남는다 |
-| 4-7 | 재현성 | 같은 collect 데이터에 같은 patterns.json으로 두 번 `run_scan()` | 두 스캔의 매칭 건수와 (패턴, 위치, 값) 조합이 같다. 브라우저를 쓰지 않으므로 사이트 변화에 영향받지 않는다 |
+| 4-7 | 재현성 | 같은 collect 데이터에 같은 patterns.json으로 두 번 `detect_matches()` | 두 스캔의 매칭 건수와 (패턴, 위치, 값) 조합이 같다. 브라우저를 쓰지 않으므로 사이트 변화에 영향받지 않는다 |
 | 4-8 | collect 테이블 저장 | `save_collected()` 호출 후 DB 조회 | `collect`에 url/method/headers_json/body/time이 저장된다. 본문 없는 요청은 `body`가 NULL이고, 헤더는 JSON 문자열이다 |
 
 ## 5. 조회
@@ -118,10 +118,9 @@
 | 6-1 | 매칭 즉시 출력 | 매칭이 있는 페이지 방문 | 매칭마다 `[MATCH]` 한 줄이 출력된다. 필터로 제외된 항목은 출력되지 않는다 |
 | 6-2 | 출력 형식 | `[MATCH]` 줄 확인 | `[MATCH] pattern=<이름>\|location=<위치>\|matched_value=<값>\|url=<URL>\|context=<문맥>\|detail=<부가정보>` 형식이며 한 줄이다. 필드는 `\|`로 구분한다. `context`와 `detail`은 각각 200자까지만 싣고 넘치면 `...`으로 자른다. 값에 줄바꿈이 있어도 공백으로 접어 한 줄을 유지한다 |
 | 6-3 | 즉시성 | URL 2개를 스캔하고 출력 순서 확인 | 첫 URL의 `[MATCH]`가 두 번째 URL 처리 시작 전에 출력된다 (버퍼링 지연 없음) |
-| 6-4 | 건너뛴 URL 알림 | 도달 불가 URL 포함 | `[SKIP] <url> - <에러 사유>` 형식으로 출력된다 |
-| 6-5 | 스트림 분리 | 표준출력만 파이프로 받음 | `[MATCH]`와 에이전트 최종 응답은 stdout, `[SKIP]`은 stderr로 나가 서로 섞이지 않는다 |
-| 6-6 | 값 노출 정책 | `[MATCH]` 줄 확인 | 매칭된 값 자체는 콘솔에 출력한다 (DB에도 원본 저장). `matched_value`는 자르지 않고 원본 전체를 싣는다 |
-| 6-7 | 문맥 분리 출력 | `page_url`이 긴 페이지에서 매칭 발생 | `context`가 `detail`과 별개 필드로 나와, `detail`이 200자에 잘려도 문맥이 사라지지 않는다 |
+| 6-4 | 스트림 분리 | 표준출력만 파이프로 받음 | `[MATCH]`와 에이전트 최종 응답은 stdout, `[RECORD]`·`[TRACE]` 같은 진행 알림은 stderr로 나가 서로 섞이지 않는다 |
+| 6-5 | 값 노출 정책 | `[MATCH]` 줄 확인 | 매칭된 값 자체는 콘솔에 출력한다 (DB에도 원본 저장). `matched_value`는 자르지 않고 원본 전체를 싣는다 |
+| 6-6 | 문맥 분리 출력 | `page_url`이 긴 페이지에서 매칭 발생 | `context`가 `detail`과 별개 필드로 나와, `detail`이 200자에 잘려도 문맥이 사라지지 않는다 |
 
 ## 7. 패턴 도출
 
@@ -135,10 +134,13 @@
 | 7-4 | 회귀 없음 게이트 | 표본이 적어 과적합한 후보가 나오는 상황 | 기존 패턴이 잡던 값을 놓치는 후보(`lost` 있음)는 채택되지 않고, 탈락 이유가 note에 표시된다 |
 | 7-5 | 과일반화 점검 | 후보의 합성 음성 차단율 확인 | 앵커를 훼손한 값(`notnaver.com`, `naver.com.attacker.io` 등)을 후보가 잡지 않는다 |
 | 7-6 | 제안 전용 | `suggest_patterns()` 호출 전후 비교 | `data/patterns.json`이 바뀌지 않는다 (해시 동일) |
-| 7-7 | collect 본문 귀납 | `suggest_patterns(source="collect")` | JSON 본문의 같은 키끼리 값을 모아 키별로 후보를 만든다. 반환값에 `json_key`가 담기고 `bodies_analyzed`가 본문 있는 행 수와 같다 |
+| 7-7 | collect 본문 귀납 | `suggest_patterns(source="collect")` | JSON 본문의 같은 키끼리 값을 모아 키별로 후보를 만든다. 반환값에 `json_key`가 담기고 `rows_analyzed`가 본문 있는 행 수와 같다 |
 | 7-8 | limit이 본문 행만 센다 | 본문 없는 행이 대다수인 상태에서 `source="collect"` | 본문 있는 행이 `limit`보다 적으면 전부 분석된다 (본문 없는 행이 limit을 먹지 않는다) |
 | 7-9 | 표본 부족 키 제외 | 값이 `min_cluster` 미만인 키가 섞인 상태 | 그 키는 후보를 만들지 않고 `keys_too_few_values`로 센다 |
 | 7-10 | source 검증 | `source`에 `matches`/`collect` 외 값 지정 | `ValueError`로 거부한다. 두 경로 모두 반환값에 `source` 필드가 있어 어느 테이블을 분석했는지 알 수 있다 |
+| 7-11 | 컬럼 지목 조회 | `suggest_patterns(column="content", json_key="sectionId")` | 그 컬럼·키를 WHERE 절로 걸러 조회한 행만 분석하고, 후보를 상위 몇 개로 자르지 않는다 |
+| 7-12 | 없는 컬럼을 지목 | `suggest_patterns(column="detail_json", json_key="sectionId")` | `rows_analyzed`가 0이고, `found_in_other_columns`에 실제로 있는 컬럼과 행 수가 담긴다 (조용한 0건으로 끝나지 않는다) |
+| 7-13 | 컬럼 화이트리스트 | `column`에 `content`/`detail_json` 외 값 지정 | `ValueError`로 거부한다 (컬럼명은 SQL에 그대로 들어가므로 조회 전에 막는다) |
 
 ---
 
@@ -155,14 +157,14 @@
 | 5 | 데이터 무결성 | 3-1 ~ 3-7, 5-8 |
 | 6 | 즉시성 | 6-1, 6-3 |
 | 7 | 재현성 | 4-7 |
-| 8 | 전체 통과율 90% | 위 71건 전체 |
+| 8 | 전체 통과율 90% | 위 73건 전체 |
 
 ## 현재까지 확인된 항목
 
 로컬 HTTP 서버(5개 위치에 데이터를 심고 새 탭 링크 포함)로 `record_session`을 돌리고,
-이관된 collect 2082행으로 `run_scan`·`suggest_patterns`를 돌려 아래를 확인했다:
+이관된 collect 2082행으로 `detect_matches`·`suggest_patterns`를 돌려 아래를 확인했다:
 
-**1-1, 1-2, 1-3, 1-4, 1-5, 1-6, 1-9, 1-10, 1-13, 2-1, 2-2, 2-7, 2-9, 2-10, 2-11, 2-12, 3-1, 3-3, 3-7, 4-3, 4-8, 5-1, 5-2, 5-3, 5-12, 5-13, 5-14, 6-1, 6-2, 6-4, 6-7, 7-1, 7-2, 7-3, 7-4, 7-5, 7-6, 7-7, 7-8, 7-9, 7-10** (41 / 71)
+**1-1, 1-2, 1-3, 1-4, 1-5, 1-6, 1-9, 1-10, 1-13, 2-1, 2-2, 2-7, 2-9, 2-10, 2-11, 2-12, 3-1, 3-3, 3-7, 4-3, 4-8, 5-1, 5-2, 5-3, 5-12, 5-13, 5-14, 6-1, 6-2, 6-6, 7-1, 7-2, 7-3, 7-4, 7-5, 7-6, 7-7, 7-8, 7-9, 7-10, 7-11, 7-12, 7-13** (43 / 73)
 
 나머지 항목과 정식 판정 결과는 [evaluation/report.md](evaluation/report.md)에 기록한다.
 성공 기준 1·2(에이전트 경로)는 아직 미실행이다. `.env`의 `BEDROCK_MODEL_ID`·`AWS_REGION`은 채워져 있고 Bedrock 호출까지 도달하지만, 현재 Bedrock 일일 토큰 쿼터(`ThrottlingException: Too many tokens per day`)에 걸려 응답을 받지 못한 상태다.

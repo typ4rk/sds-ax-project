@@ -18,7 +18,7 @@ MAX_CANDIDATES = 5
 PATTERNS_PATH = DATA_DIR / "patterns.json"
 
 
-def run_scan() -> dict:
+def detect_matches() -> dict:
     """collect 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
     collect_traffic이 수집해 둔 원본 관측 데이터를 대상으로 하므로 브라우저를 띄우지
@@ -60,7 +60,7 @@ def run_scan() -> dict:
     finally:
         status = _finish(conn, scan_id, tally["chunks"])
 
-    return _scan_result(scan_id, source, len(rows), tally["chunks"], status, methods, tally, [])
+    return _scan_result(scan_id, source, len(rows), tally["chunks"], status, methods, tally)
 
 
 def _new_tally() -> dict:
@@ -109,7 +109,7 @@ def _finish(conn, scan_id: int, processed: int) -> str:
 
 def _scan_result(
     scan_id: int, source: str, total: int, processed: int, status: str,
-    methods: set | None, tally: dict, skipped: list[dict],
+    methods: set | None, tally: dict,
 ) -> dict:
     """탐지 결과를 에이전트가 요약하기 좋은 모양으로 조립한다."""
     return {
@@ -122,7 +122,6 @@ def _scan_result(
         "matches_by_pattern": dict(tally["by_pattern"]),
         "matches_by_location": dict(tally["by_location"]),
         "method_filter": sorted(methods) if methods is not None else None,
-        "skipped": skipped,
     }
 
 
@@ -161,7 +160,7 @@ def collect_traffic(start_url: str | None = None) -> dict:
     응답 바디(body), 요청 페이로드(request_body), 쿠키(cookie), 콘솔(console).
 
     정규식 매칭을 거치지 않은 원본을 그대로 남긴다 — matches 테이블이 "패턴에 걸린
-    것"이라면 collect 테이블은 "오간 것 전부"다. 이후 run_scan이 이 데이터를 대상으로
+    것"이라면 collect 테이블은 "오간 것 전부"다. 이후 detect_matches가 이 데이터를 대상으로
     탐지하므로, 수집 당시 상태(로그인 후 페이지 포함)가 그대로 검사된다.
 
     로그인 세션은 저장하지 않는다.
@@ -204,40 +203,71 @@ def suggest_patterns(
     min_cluster: int = 3,
     limit: int = 1000,
     source: str = "matches",
+    column: str | None = None,
+    json_key: str | None = None,
 ) -> dict:
     """정규식 후보를 제안한다. 분석 대상은 source로 고른다.
 
     - source="matches"(기본): 이미 패턴에 걸린 값들을 분석해 더 좁은 후보를 만든다.
-    - source="collect": collect 테이블의 요청 본문(body)을 분석해 새 후보를 만든다.
+    - source="collect": collect 테이블을 분석해 새 후보를 만든다.
       아직 어떤 패턴에도 안 걸린 값에서 패턴을 찾을 때 쓴다.
+
+    요청이 컬럼(column)이나 JSON 키(json_key)를 지목하면 그것을 조건으로 collect
+    테이블을 **먼저 SQL로 조회하고, 돌아온 행에만** 귀납을 돌린다. 둘 중 하나라도
+    주어지면 source는 "collect"로 본다 — 두 값 모두 collect 테이블의 이야기다.
+
+    - column: 분석할 텍스트 컬럼 ("content" | "detail_json"). 생략하면 요청
+      본문(request_body)의 content만 본다(기존 동작).
+    - json_key: 찾을 JSON 키 이름(예: "sectionId"). 그 키를 포함한 행만 조회하고
+      그 키의 값만 귀납하며, 후보를 상위 몇 개로 자르지 않는다.
 
     data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
     """
+    if column or json_key:
+        source = "collect"
     if source == "collect":
-        return _suggest_from_collect(min_cluster, limit)
+        return _suggest_from_collect(min_cluster, limit, column, json_key)
     if source != "matches":
         raise ValueError(f"source는 'matches' 또는 'collect'여야 합니다: {source!r}")
     return _suggest_from_matches(pattern_name, scan_id, min_cluster, limit)
 
 
-def _suggest_from_collect(min_cluster: int, limit: int) -> dict:
-    """collect 테이블의 요청 본문에서 새 정규식 후보를 도출한다.
+def _suggest_from_collect(
+    min_cluster: int,
+    limit: int,
+    column: str | None = None,
+    json_key: str | None = None,
+) -> dict:
+    """collect 테이블을 조건대로 조회한 뒤, 돌아온 데이터에서 정규식 후보를 도출한다.
 
-    본문을 통째로 귀납에 넣으면 의미 있는 정규식이 나오지 않으므로, JSON 본문의
+    요청이 컬럼이나 키를 지목하면 그것을 WHERE 절로 옮겨 SQL로 먼저 걸러 온다.
+    파이썬에서 걸러내면 limit이 먼저 잘려 원하는 행을 놓치고, 조회 결과가 0건이라는
+    사실("그 컬럼엔 없다")도 후보 목록에 묻혀 드러나지 않는다.
+
+    컬럼을 지목하지 않으면 기존대로 요청 본문(request_body)의 content만 본다.
+    지목하면 위치를 제한하지 않는다 — detail_json에는 요청 본문이 아닌 행도 있다.
+
+    본문을 통째로 귀납에 넣으면 의미 있는 정규식이 나오지 않으므로, JSON에서
     같은 키끼리 값을 모아(예: 여러 요청의 bizCd) 키별로 귀납한다. 서로 다른 값이
     min_cluster 미만인 키는 과적합하므로 건너뛴다.
 
     matches 경로와 달리 기준이 될 기존 정규식이 없어 회귀(lost) 판정을 할 수 없다.
     그래서 채택 게이트는 컴파일 가능·ReDoS 없음·커버리지만 본다.
     """
-    rows = retriever.find_collected(limit, location="request_body")
+    target = column or "content"
+    # 컬럼을 지목하지 않은 요청만 요청 본문으로 좁힌다 (기존 동작 유지).
+    location = None if column else "request_body"
+    rows = retriever.find_collect_column(
+        target, contains=json_key, location=location, limit=limit
+    )
     if not rows:
-        raise ValueError(
-            "collect 테이블에 요청 본문(request_body) 행이 없습니다."
-            " collect_traffic으로 POST 트래픽을 먼저 수집하세요."
-        )
+        return _collect_query_empty(target, location, json_key)
 
-    buckets = _induce.values_by_key([row["content"] for row in rows])
+    buckets = _induce.values_by_key([row["text"] for row in rows])
+    if json_key:
+        # 키를 지목했으면 그 키의 값만 귀납한다. 나머지 키는 요청 대상이 아니다.
+        buckets = {json_key: buckets[json_key]} if json_key in buckets else {}
+
     candidates = []
     skipped_keys = []
     for key, values in sorted(buckets.items()):
@@ -263,15 +293,76 @@ def _suggest_from_collect(min_cluster: int, limit: int) -> dict:
 
     return {
         "source": "collect",
-        "bodies_analyzed": len(rows),
+        "column": target,
+        "json_key": json_key,
+        "location_filter": location,
+        "rows_analyzed": len(rows),
         "json_keys_found": len(buckets),
         "keys_too_few_values": len(skipped_keys),
-        "candidates": candidates[:MAX_CANDIDATES * 4],
-        "note": (
-            "collect 테이블의 요청 본문에서 JSON 키별로 도출한 후보입니다."
-            " 기존 패턴이 없어 회귀 판정은 하지 않았으며, patterns.json은 변경되지 않았습니다."
-        ),
+        # 키를 지목한 요청은 후보가 몇 개든 다 돌려준다. 값 종류가 적어 support가
+        # 낮은 키는 상위 몇 개로 자르면 정작 요청받은 키가 잘려 나간다.
+        "candidates": candidates if json_key else candidates[:MAX_CANDIDATES * 4],
+        "note": _collect_note(target, json_key, buckets, min_cluster),
     }
+
+
+def _collect_query_empty(column: str, location: str | None, json_key: str | None) -> dict:
+    """조회 결과가 0건일 때, 왜 없는지와 어디에 있는지를 찾아 돌려준다.
+
+    컬럼을 잘못 지목한 요청이 조용히 0건으로 끝나면 "그런 값이 없다"로 오해된다.
+    지목한 키가 다른 텍스트 컬럼에 있으면 그 사실을 세어 함께 알린다.
+    """
+    if not json_key:
+        raise ValueError(
+            f"collect 테이블의 {column} 컬럼에 분석할 행이 없습니다"
+            f"{f' (location={location})' if location else ''}."
+            " collect_traffic으로 트래픽을 먼저 수집하세요."
+        )
+
+    elsewhere = {
+        other: retriever.count_collect_column(other, json_key)
+        for other in retriever.COLLECT_TEXT_COLUMNS
+        if other != column
+    }
+    found_in = {name: hits for name, hits in elsewhere.items() if hits}
+    note = f"collect 테이블의 {column} 컬럼에 '{json_key}'을(를) 포함한 행이 없습니다."
+    if found_in:
+        where = ", ".join(f"{name} 컬럼에 {hits}행" for name, hits in found_in.items())
+        note += f" 대신 {where} 있습니다 — column을 바꿔 다시 요청하세요."
+    else:
+        note += " 어느 텍스트 컬럼에도 없어, 수집된 적이 없는 값으로 보입니다."
+
+    return {
+        "source": "collect",
+        "column": column,
+        "json_key": json_key,
+        "location_filter": location,
+        "rows_analyzed": 0,
+        "candidates": [],
+        "found_in_other_columns": found_in,
+        "note": note,
+    }
+
+
+def _collect_note(column: str, json_key: str | None, buckets: dict, min_cluster: int) -> str:
+    """collect 경로의 결과에 붙일 설명을 만든다. 회귀 판정을 못 한다는 한계를 항상 밝힌다."""
+    base = " 기존 패턴이 없어 회귀 판정은 하지 않았으며, patterns.json은 변경되지 않았습니다."
+    if json_key and not buckets:
+        return (
+            f"'{json_key}'을(를) 포함한 행은 {column} 컬럼에 있지만, JSON 키로는"
+            " 나오지 않았습니다. 값이 아니라 텍스트 일부이거나 본문이 JSON이 아닙니다."
+        )
+    if json_key and len(next(iter(buckets.values()))) < min_cluster:
+        return (
+            f"'{json_key}'의 서로 다른 값이 {len(next(iter(buckets.values())))}개뿐이라"
+            f" 일반화할 수 없습니다 (최소 {min_cluster}개 필요). 더 모은 뒤 다시 시도하세요."
+        )
+    scope = (
+        f"{column} 컬럼의 '{json_key}' 키에서"
+        if json_key
+        else f"{column} 컬럼에서 JSON 키별로"
+    )
+    return f"collect 테이블 {scope} 도출한 후보입니다.{base}"
 
 
 def _suggest_from_matches(

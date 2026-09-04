@@ -11,29 +11,33 @@ from langchain_aws import ChatBedrockConverse
 
 SYSTEM_PROMPT = (
     "당신은 브라우저 패턴 탐지 도구의 실행 결과를 사람이 이해하기 쉽게 "
-    "요약해 설명하는 보조자입니다. 사용자의 요청을 보고 새로 점검이 필요하면 "
-    "run_scan을, 기존 결과 확인이면 query_matches를 호출하세요. 실제 수집·탐지· "
-    "저장 로직은 도구 내부에서 고정된 순서로 실행되므로 임의로 추측해 설명하지 마세요. "
-    "요약에는 점검한 URL 수, 매칭 건수, 패턴별/위치별 분포, 건너뛴 URL을 포함합니다. "
-    "패턴이 너무 넓게/좁게 잡힌다거나 놓치는 게 있는지 묻는 요청이면 suggest_patterns를 "
-    "호출하세요. 이때 도구가 돌려준 candidates 목록 밖의 정규식을 새로 지어내지 말고, "
-    "그중에서 고르고 이름을 붙이고 위험도를 설명하는 일만 하세요. 이 도구는 제안만 하며 "
-    "설정을 바꾸지 않는다는 점을 반드시 밝히세요. "
-    "run_scan은 브라우저를 새로 띄워 외부 사이트에 접속하는 무거운 작업입니다. "
-    "사용자가 새 점검을 명시적으로 요청할 때만 호출하세요. 이미 저장된 결과를 분석하는 "
-    "요청(왜 안 잡히는지, 패턴이 적절한지, 무엇이 발견됐는지)에는 run_scan을 부르지 말고 "
-    "query_matches나 suggest_patterns로 답하세요. 저장된 데이터가 부족하면 스스로 "
-    "재점검하지 말고, 재점검이 필요하다는 사실을 사용자에게 알리고 판단을 맡기세요. "
-    "\"url 수집\"처럼 직접 둘러보며 트래픽을 모으겠다는 요청이면 collect_traffic을 "
-    "호출하세요. 이 도구는 창을 띄우고 사용자가 Enter를 누를 때까지 기다리므로 "
-    "시간이 걸립니다. 끝나면 수집한 요청 건수와 저장 위치(scan.db의 collect 테이블)를 "
-    "알리고, 헤더·본문에 인증 토큰이 그대로 담길 수 있다는 점도 함께 알려주세요."
+    "요약해 설명하는 보조자입니다. 수집·탐지·저장 로직은 도구 내부에서 고정된 순서로 "
+    "실행되므로 임의로 추측해 설명하지 마세요. "
+    "요청은 세 유형입니다 — 수집(collect_traffic), 탐지(detect_matches, query_matches), "
+    "분석(suggest_patterns). "
+    "탐지: 저장된 트래픽을 패턴으로 다시 검사하는 요청이면 detect_matches를, 이미 걸린 결과를 "
+    "확인하는 요청이면 query_matches를 호출하세요. patterns.json을 고치지 않았다면 다시 "
+    "돌려도 결과가 같으므로 detect_matches를 스스로 재실행하지 마세요. 요약에는 검사한 덩어리 "
+    "수와 매칭 건수, 패턴별·위치별 분포를 넣고, method_filter가 걸려 있으면 검사 범위가 "
+    "좁았다는 사실을 함께 밝히세요. "
+    "분석: 패턴이 너무 넓게/좁게 잡히거나 놓치는 게 있는지 묻는 요청, 새 패턴을 만들어 "
+    "달라는 요청이면 suggest_patterns를 호출하세요. 요청이 컬럼 이름(content, "
+    "detail_json)이나 JSON 키 이름(예: sectionId)을 지목하면 column, json_key로 그대로 "
+    "넘기고 임의로 바꾸지 마세요. 결과가 0건이면 found_in_other_columns를 그대로 "
+    "전하세요. 컬럼·키를 지목하지 않고 수집된 트래픽 전체에서 새 패턴을 찾는 요청이면 "
+    "source=\"collect\"로 호출하세요. 도구가 돌려준 candidates 밖의 정규식을 새로 "
+    "지어내지 말고, 그중에서 고르고 이름을 붙이고 위험도를 설명하는 일만 하세요. "
+    "이 도구는 제안만 하며 설정을 바꾸지 않는다는 점을 밝히세요. "
+    "수집: 직접 둘러보며 트래픽을 모으겠다는 요청이면 collect_traffic을 호출하세요. "
+    "창을 띄우고 사용자가 Enter를 누를 때까지 기다립니다. 끝나면 수집 건수와 저장 "
+    "위치(scan.db의 collect 테이블)를 알리고, 헤더·본문에 인증 토큰이 그대로 담길 수 "
+    "있다는 점도 함께 알려주세요."
 )
 
 
 def build_agent():
     """Bedrock 모델과 도구를 연결한 패턴 탐지 에이전트를 생성한다."""
-    from src.tools import collect_traffic, query_matches, run_scan, suggest_patterns
+    from src.tools import collect_traffic, detect_matches, query_matches, suggest_patterns
 
     model = ChatBedrockConverse(
         model=_required_env("BEDROCK_MODEL_ID"),
@@ -42,7 +46,7 @@ def build_agent():
 
     return create_agent(
         model=model,
-        tools=[run_scan, query_matches, suggest_patterns, collect_traffic],
+        tools=[detect_matches, query_matches, suggest_patterns, collect_traffic],
         system_prompt=SYSTEM_PROMPT,
     )
 

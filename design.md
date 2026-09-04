@@ -24,7 +24,7 @@ my-pjt/
 ├── src/
 │   ├── main.py                  # CLI 진입점: 자연어 요청 1개를 받아 에이전트 실행
 │   ├── agent.py                 # 메인 에이전트 그래프 (LangGraph ReAct 루프, create_agent 활용)
-│   ├── tools.py                 # 도메인 도구 4개: run_scan / query_matches / suggest_patterns / collect_traffic
+│   ├── tools.py                 # 도메인 도구 4개: detect_matches / query_matches / suggest_patterns / collect_traffic
 │   ├── retriever.py             # SQLite 조회 헬퍼 (query_matches가 내부적으로 사용, RAG/임베딩 아님)
 │   ├── _browser.py              # (내부) Playwright 세션, 페이지 방문 수집, 트래픽 기록
 │   ├── _matcher.py              # (내부) 정규식 패턴 매칭 (정규식 → 값)
@@ -46,7 +46,7 @@ my-pjt/
 ```
 collect_traffic   창을 띄워 사람이 직접 둘러본다 → 오간 데이터를 collect 테이블에 저장
      │
-run_scan          collect 테이블을 대상으로 정규식 탐지 (브라우저 없이, 몇 번이든)
+detect_matches          collect 테이블을 대상으로 정규식 탐지 (브라우저 없이, 몇 번이든)
 ```
 
 - 사람이 직접 이동하므로 **로그인해야 보이는 페이지도 수집된다.** 목록 파일 방식으로는
@@ -145,7 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_collect_collected_at ON collect(collected_at);
 
 `collect`는 `collect_traffic`이 모아 둔 **정규식을 거치지 않은 원본**이다. 컬럼 구성이
 `_browser`의 `emit(위치, 텍스트, URL, 부가정보)`과 같은 모양이라, 수집 경로와 저장 형식이
-어긋날 수 없고 `run_scan`이 그대로 되돌려 검사한다. `location`은 `matches`와 같은 어휘를 쓴다.
+어긋날 수 없고 `detect_matches`이 그대로 되돌려 검사한다. `location`은 `matches`와 같은 어휘를 쓴다.
 
 `matches`가 "패턴에 걸린 것"이라면 `collect`는 "오간 것 전부"이므로, 쿠키·`Authorization`
 헤더·POST 본문의 자격증명이 그대로 담긴다 — **`matches`보다 민감하다.**
@@ -179,10 +179,16 @@ def find_matches(
 | `find_matches(...)` | 조건별 매칭 조회. `tools.query_matches()`가 그대로 감싼다 |
 | `find_distinct_values(...)` | 중복 없는 `matched_value` + 빈도. 정규식 귀납의 양성 표본 |
 | `find_context_texts(...)` | 정규식이 적용된 적 없는 부수 텍스트(url, detail). 후보 검증 코퍼스 |
-| `find_collected(limit, location)` | `collect` 테이블의 원본 관측 데이터. `run_scan`의 탐지 대상 |
+| `find_collected(limit, location)` | `collect` 테이블의 원본 관측 데이터. `detect_matches`의 탐지 대상 |
+| `find_collect_column(column, contains, location, limit)` | `collect`의 지정 텍스트 컬럼 원문. 컬럼·키를 지목한 분석 요청의 조회 |
+| `count_collect_column(column, contains)` | 그 문자열을 포함한 행 수. "다른 컬럼엔 있나" 확인용 |
 
 `find_collected`는 `detail_json` 컬럼을 dict로 파싱해 **`detail` 키로 바꿔** 넘긴다
-(컬럼명과 반환 키가 다르다).
+(컬럼명과 반환 키가 다르다). 반면 `find_collect_column`은 지정한 컬럼 원문을 `text`로
+그대로 넘긴다 — 파싱 전 텍스트를 봐야 하는 귀납의 입력이기 때문이다.
+
+컬럼명은 SQL 파라미터로 넘길 수 없어 문자열로 끼워 넣으므로, `COLLECT_TEXT_COLUMNS`
+화이트리스트(`content`, `detail_json`)에 없으면 조회 전에 `ValueError`로 막는다.
 
 `location`을 주면 그 위치만 **SQL 단계에서** 걸러 온다. 특정 위치(예: `request_body`)는
 전체의 일부이므로, 파이썬에서 걸러내면 `limit`이 먼저 잘려 원하는 행을 놓친다 —
@@ -193,7 +199,7 @@ def find_matches(
 ## 6. `src/tools.py` — 도메인 도구
 
 ```python
-def run_scan() -> dict:
+def detect_matches() -> dict:
     """collect 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
     collect_traffic이 수집해 둔 원본 관측 데이터를 대상으로 하므로 브라우저를 띄우지
@@ -220,7 +226,7 @@ def collect_traffic(start_url: str | None = None) -> dict:
     3) 관측 덩어리마다 위치/텍스트/URL/부가정보를 collect 테이블에 즉시 저장
 
     수집 위치는 patterns.json의 targets 설정이 정한다. 정규식 매칭을 거치지 않은
-    원본을 그대로 남기며, 이후 run_scan이 이 데이터를 대상으로 탐지한다.
+    원본을 그대로 남기며, 이후 detect_matches가 이 데이터를 대상으로 탐지한다.
     """
 
 
@@ -246,12 +252,18 @@ def suggest_patterns(
     min_cluster: int = 3,
     limit: int = 1000,
     source: str = "matches",
+    column: str | None = None,
+    json_key: str | None = None,
 ) -> dict:
     """정규식 후보를 제안한다. 분석 대상은 source로 고른다.
 
     - source="matches"(기본): 이미 패턴에 걸린 값들을 분석해 더 좁은 후보를 만든다.
-    - source="collect": collect 테이블의 요청 본문(body)을 분석해 새 후보를 만든다.
+    - source="collect": collect 테이블을 분석해 새 후보를 만든다.
       아직 어떤 패턴에도 안 걸린 값에서 패턴을 찾을 때 쓴다.
+
+    요청이 컬럼(column)이나 JSON 키(json_key)를 지목하면 그것을 조건으로 collect
+    테이블을 먼저 SQL로 조회하고, 돌아온 행에만 귀납을 돌린다. 둘 중 하나라도
+    주어지면 source는 "collect"로 본다.
 
     data/patterns.json을 변경하지 않는다 — 제안만 돌려주고 채택은 사람이 판단한다.
     """
@@ -270,10 +282,24 @@ def suggest_patterns(
 
 #### `source="collect"` — 아직 안 잡힌 값에서 새 패턴을 찾는 경로
 
-1. `retriever.find_collected(limit, location="request_body")` — 요청 본문 행만 가져온다
-2. `_induce.values_by_key()` — JSON 본문에서 **같은 키의 값끼리** 모은다
+1. `retriever.find_collect_column(column, contains=json_key, location, limit)` — **조회가 먼저다**
+2. `_induce.values_by_key()` — 조회된 텍스트에서 **같은 키의 값끼리** 모은다
 3. 키별로 `_induce.induce_regex()` → `evaluate_candidate()`
 4. `support`(값 종류 수) 내림차순 → `tightness` → 길이 순으로 정렬해 반환
+
+**요청이 지목한 조건은 WHERE 절로 내린다.** "collect 테이블 content 컬럼에서 sectionId를
+찾는 패턴"처럼 컬럼·키를 지목한 요청은 `column`/`json_key`로 받아 조회 조건으로 쓰고,
+돌아온 행에만 귀납을 돌린다. 파이썬에서 걸러내면 `limit`이 먼저 잘려 행을 놓치고,
+"그 컬럼엔 없다"는 사실도 후보 목록에 묻혀 드러나지 않는다.
+
+- 컬럼을 지목하지 않으면 기존대로 요청 본문(`request_body`)의 `content`만 본다.
+  지목하면 위치를 제한하지 않는다 — `detail_json`에는 요청 본문이 아닌 행도 있다
+- 키를 지목한 요청은 후보를 상위 몇 개로 자르지 않는다. 값 종류가 적어 `support`가
+  낮은 키는 자르면 정작 요청받은 키가 잘려 나간다 (`sectionId`는 값이 3종뿐이라
+  전체 36개 후보 중 30위였고, 상위 20개 컷에 걸려 사라졌다)
+- 조회가 0건이면 후보 대신 **어느 컬럼에 있는지**를 `found_in_other_columns`로 돌려준다.
+  조용한 0건이 "그런 값이 없다"로 오해되는 것을 막는다 — `detail_json`에는
+  `direction`/`method`밖에 없어 `sectionId`를 거기서 찾으면 항상 0건이다
 
 **본문을 통째로 귀납하지 않는다.** 2600자 JSON을 그대로 넣으면 의미 있는 정규식이
 나오지 않는다. 반면 여러 요청의 같은 키(예: `bizCd`) 값들은 형식이 같을 가능성이 높아
@@ -293,7 +319,7 @@ def suggest_patterns(
 ### 수집과 탐지가 나뉜 이유
 
 ```
-collect_traffic ──> collect 테이블 ──> run_scan ──> matches 테이블
+collect_traffic ──> collect 테이블 ──> detect_matches ──> matches 테이블
   (브라우저, 1회)     (원본 보관)      (브라우저 없음, 반복)   (패턴에 걸린 것)
 ```
 
@@ -330,7 +356,7 @@ import os
 
 def build_agent():
     """Bedrock 모델과 도구를 연결한 패턴 탐지 에이전트를 생성한다."""
-    from src.tools import query_matches, run_scan
+    from src.tools import query_matches, detect_matches
 
     model = ChatBedrockConverse(
         model=_required_env("BEDROCK_MODEL_ID"),
@@ -339,15 +365,16 @@ def build_agent():
 
     return create_agent(
         model=model,
-        tools=[run_scan, query_matches],
+        tools=[detect_matches, query_matches],
         system_prompt=SYSTEM_PROMPT,
     )
 ```
 
-- `SYSTEM_PROMPT`는 모듈 상수로 두며, **점검한 URL 수·매칭 건수·패턴별/위치별 분포·건너뛴 URL을 요약에 포함**할 것을 지시한다. 값 자체는 `[MATCH]` 줄과 DB에 그대로 남으므로([verification.md](verification.md) 6-6) 요약에서 따로 가리지 않는다
+- `SYSTEM_PROMPT`는 모듈 상수로 두며, 요청을 **수집·탐지·분석 세 유형**으로 나눠 유형별 규칙만 담는다. 탐지 요약에는 **검사한 덩어리 수·매칭 건수·패턴별/위치별 분포**를 넣고, `method_filter`가 걸려 있으면 검사 범위가 좁았다는 사실을 함께 밝히게 한다 (매칭 0건을 "유출 없음"으로 요약하는 것을 막는다). 값 자체는 `[MATCH]` 줄과 DB에 그대로 남으므로([verification.md](verification.md) 6-5) 요약에서 따로 가리지 않는다
+- 분석 요청이 컬럼이나 JSON 키를 지목하면 **`column`/`json_key`로 그대로 넘기게** 한다. LLM이 임의로 다른 컬럼으로 바꾸면 "그 컬럼엔 없다"는 조회 결과 자체가 사라진다
 - 패턴 개선 요청에는 `suggest_patterns`를 호출하되, **도구가 돌려준 `candidates` 밖의 정규식을 새로 지어내지 말 것**을 명시한다. LLM은 후보를 고르고·이름 붙이고·위험도를 설명하는 편집자 역할이며, 정규식의 저자가 아니다 (검증 불가능한 환각이 탐지 규칙이 되는 것을 막는다)
 - `_required_env(name)`로 필수 환경변수를 읽어, 값이 없으면 무엇이 빠졌는지 알리는 `RuntimeError`를 던진다 (`main.py`가 이를 잡아 `[ERROR]`로 출력)
-- ReAct 루프: LLM이 요청을 보고 `run_scan`/`query_matches` 중 무엇을, 몇 번 호출할지 스스로 판단 (`create_agent`가 이 루프를 LangGraph 그래프로 컴파일)
+- ReAct 루프: LLM이 요청을 보고 `detect_matches`/`query_matches` 중 무엇을, 몇 번 호출할지 스스로 판단 (`create_agent`가 이 루프를 LangGraph 그래프로 컴파일)
 - 도구 내부(수집→탐지→저장, 조회)의 순서는 고정이며 LLM이 그 세부 단계를 정하지 않음
 
 ## 8. `src/main.py` — 실행 진입점
@@ -358,7 +385,7 @@ def build_agent():
 python -m venv .venv
 .venv\Scripts\activate          # Windows (bash: source .venv/Scripts/activate)
 pip install -r requirements.txt
-playwright install chromium      # 브라우저 바이너리는 pip이 받지 않는다 — 없으면 run_scan이 실패
+playwright install chromium      # 브라우저 바이너리는 pip이 받지 않는다 — 없으면 detect_matches가 실패
 copy .env.example .env           # 복사 후 BEDROCK_MODEL_ID / AWS_REGION 을 채운다
 ```
 
@@ -371,7 +398,7 @@ python -m src.main "<자연어 요청>"
 예시:
 ```bash
 python -m src.main "url 수집"                              # 창을 띄워 직접 둘러본다
-python -m src.main "수집된 트래픽에서 토큰 유출 있는지 확인해줘"
+python -m src.main "수집된 트래픽에서 개인정보 유출 있는지 확인해줘"
 python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 ```
 
@@ -383,20 +410,20 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 
 ### 출력 (두 단계)
 
-1. **즉시 출력 (도구 실행 중)**: `run_scan` 실행 중 매칭 발생 시 다음 형태로 즉시 콘솔 출력
+1. **즉시 출력 (도구 실행 중)**: `detect_matches` 실행 중 매칭 발생 시 다음 형태로 즉시 콘솔 출력
    ```
    [MATCH] pattern=origin_body|location=body|matched_value="origin"|url=https://www.naver.com/|context=..."utf-8"> <meta name="Referrer" content="origin"> <meta http-equiv="X-UA-Compat...|detail={'page_url': 'https://www.naver.com/', 'status': 200}
    ```
    필드는 `|`로 구분한다. `url`은 매칭된 값이 아니라 **값이 발견된 리소스 URL**이고,
    실제로 패턴에 걸린 값은 `matched_value`다 (`detail.page_url`은 방문한 페이지).
    `matched_value`는 원본 그대로 싣고, `context`와 `detail`은 각각 200자까지 싣는다
-   ([verification.md](verification.md) 6-2, 6-6)
+   ([verification.md](verification.md) 6-2, 6-5)
 
    `context`는 매칭 자리 앞뒤 40자(`_matcher.CONTEXT_CHARS`)로, `matched_value`만으로는
    그 값이 어떤 문장 안에 있었는지 알 수 없어서 넣는다 — 위 예에서 `"origin"`이 유출이
    아니라 HTML 메타 태그의 값이라는 것이 문맥으로 드러난다. `detail`에 함께 저장하되
    출력에서는 꺼내어 별도 필드로 낸다. `detail` 안에 두면 `page_url`이 길 때 200자
-   제한에 잘려 사라지기 때문이다 ([verification.md](verification.md) 3-7, 6-7)
+   제한에 잘려 사라지기 때문이다 ([verification.md](verification.md) 3-7, 6-6)
 2. **추적 출력 (디버깅용, 기본 꺼짐)**: `SCAN_TRACE=1`이면 `visit`이 넘긴 수집 덩어리를
    매칭 여부와 함께 표준에러로 출력한다. 매칭 0건일 때 **수집이 안 된 것**인지
    **패턴이 안 맞은 것**인지 구분하기 위한 것이다. 수집 원본이 그대로 찍히므로 기본은 꺼져 있다
@@ -422,13 +449,13 @@ python -m src.main "최근 jwt-token 패턴 매칭 결과 보여줘"
 |---|---|
 | `id` | 테스트 케이스 번호 |
 | `question` | `python -m src.main`에 넘길 자연어 요청 |
-| `expected_tool` | 이 요청이 호출해야 하는 도구 (`run_scan` / `query_matches`) |
+| `expected_tool` | 이 요청이 호출해야 하는 도구 (`detect_matches` / `query_matches`) |
 | `expected_pattern` | 응답에 포함되길 기대하는 패턴 이름 (없으면 빈 값) |
 | `notes` | 판정 기준 비고 |
 
 예시 행:
 ```
-1,"수집된 트래픽에서 토큰 유출 있는지 확인해줘",run_scan,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
+1,"수집된 트래픽에서 개인정보 유출 있는지 확인해줘",detect_matches,jwt-token,"매칭 발생 시 [MATCH] 로그와 최종 요약에 모두 나와야 함"
 2,"최근 jwt-token 매칭 결과 보여줘",query_matches,jwt-token,"재스캔 없이 query_matches만 호출해야 함"
 ```
 

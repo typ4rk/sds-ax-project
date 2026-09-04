@@ -9,6 +9,10 @@ from datetime import date, timedelta
 
 from src import _storage
 
+# collect 테이블에서 직접 조회할 수 있는 텍스트 컬럼.
+# 컬럼명은 SQL 파라미터로 넘길 수 없어 문자열로 끼워 넣으므로 화이트리스트로 제한한다.
+COLLECT_TEXT_COLUMNS = ("content", "detail_json")
+
 
 def find_matches(
     pattern_name: str | None = None,
@@ -149,7 +153,7 @@ def find_context_texts(scan_id: int | None = None, limit: int = 2000) -> list[st
 def find_collected(limit: int = 5000, location: str | None = None) -> list[dict]:
     """collect 테이블에 저장된 관측 데이터를 저장 순서대로 돌려준다.
 
-    collect_traffic이 모아 둔 원본이며 run_scan의 탐지 대상이 된다. detail_json은
+    collect_traffic이 모아 둔 원본이며 detect_matches의 탐지 대상이 된다. detail_json은
     dict로 파싱해 detail 키로 바꿔 넘긴다(파싱 실패 시 빈 dict).
 
     location을 주면 그 위치만 SQL 단계에서 걸러 온다. 특정 위치(예: request_body)는
@@ -181,6 +185,75 @@ def find_collected(limit: int = 5000, location: str | None = None) -> list[dict]
             record["detail"] = {}
         collected.append(record)
     return collected
+
+
+def find_collect_column(
+    column: str,
+    contains: str | None = None,
+    location: str | None = None,
+    limit: int = 5000,
+) -> list[dict]:
+    """collect 테이블에서 지정한 텍스트 컬럼만 SQL로 걸러 가져온다.
+
+    분석 요청이 컬럼을 지목하면(예: "detail_json 컬럼에서 sectionId") 그 컬럼을 먼저
+    조회하고 돌아온 결과에만 귀납을 돌리기 위한 조회 함수다. detail_json을 dict로
+    파싱해 detail 키로 넘기는 find_collected와 달리, 여기서는 컬럼 원문을 그대로 준다.
+
+    contains를 주면 그 문자열을 포함한 행만, location을 주면 그 위치의 행만 SQL
+    단계에서 걸러 온다. 파이썬에서 걸러내면 limit이 먼저 잘려 원하는 행을 놓친다.
+
+    반환 항목: {"id", "url", "location", "text"}
+    """
+    where, params = _collect_column_where(column, contains, location)
+    sql = (
+        f"SELECT id, url, location, {column} AS text FROM collect"
+        f"{where} ORDER BY id LIMIT ?"
+    )
+    params.append(max(1, int(limit)))
+
+    conn = _storage.connect()
+    try:
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def count_collect_column(column: str, contains: str) -> int:
+    """지정한 컬럼에 그 문자열이 들어 있는 collect 행 수를 센다.
+
+    지목한 컬럼에서 결과가 0건일 때 "다른 컬럼에는 있는가"를 확인해 알려주기 위한
+    집계다. limit에 잘리지 않도록 조회가 아니라 COUNT로 센다.
+    """
+    where, params = _collect_column_where(column, contains, None)
+    conn = _storage.connect()
+    try:
+        return conn.execute(f"SELECT COUNT(*) FROM collect{where}", params).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _collect_column_where(
+    column: str, contains: str | None, location: str | None
+) -> tuple[str, list]:
+    """컬럼 이름을 검증하고 WHERE 절과 파라미터를 만든다.
+
+    컬럼명은 SQL에 그대로 끼워 넣어야 하므로, 화이트리스트에 없으면 조회 전에 막는다.
+    """
+    if column not in COLLECT_TEXT_COLUMNS:
+        raise ValueError(
+            f"collect 테이블에서 조회할 수 있는 텍스트 컬럼이 아닙니다: {column!r}"
+            f" (가능: {', '.join(COLLECT_TEXT_COLUMNS)})"
+        )
+
+    where = [f"{column} IS NOT NULL", f"{column} != ''"]
+    params: list = []
+    if contains:
+        where.append(f"{column} LIKE ?")
+        params.append(f"%{contains}%")
+    if location:
+        where.append("location = ?")
+        params.append(location)
+    return " WHERE " + " AND ".join(where), params
 
 
 def _leaf_strings(raw_detail) -> list[str]:

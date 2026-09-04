@@ -16,7 +16,7 @@ my-pjt/
 ├── src/
 │   ├── main.py            # 실행 진입점: 자연어 요청을 받아 에이전트 호출
 │   ├── agent.py            # 메인 에이전트 그래프 (LangGraph ReAct 루프)
-│   ├── tools.py             # 도메인 도구: collect_traffic(트래픽 수집), run_scan(탐지),
+│   ├── tools.py             # 도메인 도구: collect_traffic(트래픽 수집), detect_matches(탐지),
 │   │                        #             query_matches(조회), suggest_patterns(패턴 제안)
 │   └── retriever.py         # 단순 조회 헬퍼 (임베딩/RAG 아님 — SQLite 필터 조회)
 ├── data/                   # 사용한 문서와 데이터 (patterns.json, scan.db)

@@ -97,14 +97,6 @@ def _clip(value, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def notify_skip(url: str, reason: str) -> None:
-    """방문에 실패해 건너뛴 URL을 표준에러로 출력한다.
-
-    최종 응답(표준출력)과 섞이지 않도록 표준에러로 보낸다.
-    """
-    print(f"[SKIP] {url} - {reason}", file=sys.stderr, flush=True)
-
-
 def trace_enabled() -> bool:
     """수집 데이터 추적 출력이 켜져 있는지 알려준다 (환경변수 SCAN_TRACE)."""
     return os.environ.get(TRACE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}

@@ -10,23 +10,23 @@
 >
 > 실행 방법:
 > ```bash
-> python -m src.main "수집된 트래픽에서 토큰 유출 있는지 확인해줘"
+> python -m src.main "수집된 트래픽에서 개인정보 유출 있는지 확인해줘"
 > ```
 
 ## 1. 질의별 결과
 
 | id | question | expected_tool | 실제 호출 도구 | 판정 | 비고 |
 |---|---|---|---|---|---|
-| 1 | 수집된 트래픽에서 토큰 유출 있는지 확인해줘 | run_scan | - | 미실행 | |
+| 1 | 수집된 트래픽에서 개인정보 유출 있는지 확인해줘 | detect_matches | - | 미실행 | |
 | 2 | 최근 jwt-token 매칭 결과 보여줘 | query_matches | - | 미실행 | |
-| 3 | 지금 바로 다시 검사해줘 | run_scan | - | 미실행 | |
+| 3 | 지금 바로 다시 검사해줘 | detect_matches | - | 미실행 | |
 | 4 | naver.com 에서 나온 매칭만 골라서 보여줘 | query_matches | - | 미실행 | |
 | 5 | scan_id 1 결과 요약해줘 | query_matches | - | 미실행 | |
 | 6 | custom-secret 패턴이 걸린 적 있어? | query_matches | - | 미실행 | |
 | 7 | 오늘 발견된 매칭 있으면 알려줘 | query_matches | - | 미실행 | |
-| 8 | 저장된 결과 말고 새로 확인해줘 | run_scan | - | 미실행 | |
+| 8 | 저장된 결과 말고 새로 확인해줘 | detect_matches | - | 미실행 | |
 | 9 | 헤더에서 발견된 것만 있는지 확인해줘 | query_matches | - | 미실행 | |
-| 10 | 점검하고 결과까지 정리해서 알려줘 | run_scan | - | 미실행 | |
+| 10 | 점검하고 결과까지 정리해서 알려줘 | detect_matches | - | 미실행 | |
 
 **도구 선택 정확도:** - / 10
 

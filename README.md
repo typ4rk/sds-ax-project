@@ -14,14 +14,14 @@ python -m src.main                    # 인자 없으면 대화형
 
 | 도구 | 한 줄 요약 | 브라우저 | DB |
 |---|---|---|---|
-| `run_scan` | `collect`에 모아 둔 트래픽에서 등록된 정규식을 탐지한다 | 안 씀 | 읽기+쓰기 |
+| `detect_matches` | `collect`에 모아 둔 트래픽에서 등록된 정규식을 탐지한다 | 안 씀 | 읽기+쓰기 |
 | `query_matches` | 저장된 매칭 기록을 조건에 맞게 조회한다 | 안 씀 | 읽기 |
 | `suggest_patterns` | 더 정확한 정규식 후보를 제안한다 (설정은 바꾸지 않는다) | 안 씀 | 읽기 |
 | `collect_traffic` | 직접 둘러보는 동안 오간 요청 트래픽을 모아 저장한다 | **띄움** | 쓰기 |
 
 ---
 
-## `run_scan()`
+## `detect_matches()`
 
 > `collect` 테이블에 모아 둔 트래픽에서 등록된 정규식 패턴을 탐지한다.
 
@@ -40,12 +40,12 @@ python -m src.main                    # 인자 없으면 대화형
 `targets`는 **수집** 단계 설정이라 `collect_traffic`에만 영향을 준다.
 
 **반환**: `scan_id`, `source`, `chunks_total`, `chunks_scanned`, `status`,
-`matches_total`, `matches_by_pattern`, `matches_by_location`, `method_filter`, `skipped`
+`matches_total`, `matches_by_pattern`, `matches_by_location`, `method_filter`
 
 **이 도구를 부르는 요청**
 
 ```
-"수집된 트래픽에서 토큰 유출 있는지 확인해줘"
+"수집된 트래픽에서 개인정보 유출 있는지 확인해줘"
 "지금 바로 다시 검사해줘"
 "저장된 결과 말고 새로 확인해줘"
 ```
@@ -127,11 +127,11 @@ sk_live_[A-Za-z0-9]{24,} → 0건
 
 ### `source="collect"` — 아직 안 잡힌 값에서 새 패턴을 찾는다
 
-`collect` 테이블의 **요청 본문**을 분석한다. 본문을 통째로 귀납하면 의미 있는 정규식이
-나오지 않으므로, JSON 본문의 **같은 키끼리 값을 모아** 키별로 귀납한다.
+`collect` 테이블을 분석한다. 본문을 통째로 귀납하면 의미 있는 정규식이
+나오지 않으므로, JSON에서 **같은 키끼리 값을 모아** 키별로 귀납한다.
 
 ```
-bodies_analyzed 14 / json_keys_found 49 / candidates 20
+rows_analyzed 14 / json_keys_found 49 / candidates 20
 
 json_key      regex                  support
 adCntsSeq     1[0-9]{8,}                 34
@@ -142,8 +142,32 @@ bizCd         04[0-9]{2}01                4
 기준이 될 기존 정규식이 없어 **회귀 판정을 못 한다** — 채택 게이트가 컴파일 가능·
 ReDoS 없음·커버리지만 본다.
 
-**반환**: `source`, `bodies_analyzed`, `json_keys_found`, `keys_too_few_values`,
+**반환**: `source`, `column`, `json_key`, `location_filter`, `rows_analyzed`,
+`json_keys_found`, `keys_too_few_values`,
 `candidates[]`(`json_key`, `regex`, `variant`, `support`, `coverage`, `tightness`, `samples`)
+
+#### 컬럼·키를 지목하면 SQL로 먼저 걸러 온다
+
+요청이 컬럼이나 JSON 키를 지목하면 `column` / `json_key`로 넘긴다. 그 조건이 WHERE 절로
+내려가 **조회 결과에만** 귀납이 돌고, 후보를 상위 몇 개로 자르지 않는다 — 값 종류가 적어
+`support`가 낮은 키는 자르면 정작 요청받은 키가 잘려 나가기 때문이다.
+
+지목한 컬럼에 그 키가 없으면 후보 대신 **어느 컬럼에 있는지**를 돌려준다. 조용한 0건이
+"그런 값이 없다"로 오해되는 것을 막는다.
+
+```
+suggest_patterns(column="detail_json", json_key="sectionId")
+  → rows_analyzed 0 / found_in_other_columns {"content": 8}
+    "detail_json 컬럼에 'sectionId'을 포함한 행이 없습니다.
+     대신 content 컬럼에 8행 있습니다 — column을 바꿔 다시 요청하세요."
+
+suggest_patterns(column="content", json_key="sectionId")
+  → rows_analyzed 8 / candidates 3   (10[0-9]{1} · support 3 · samples 100,101,102)
+```
+
+`column`은 `content` / `detail_json`만 받는다(SQL에 이름을 그대로 끼워 넣으므로
+화이트리스트로 막는다). 컬럼을 지목하면 위치를 제한하지 않고, 지목하지 않으면 기존대로
+요청 본문(`request_body`)의 `content`만 본다.
 
 **이 도구를 부르는 요청**
 
@@ -152,6 +176,7 @@ ReDoS 없음·커버리지만 본다.
 "custom-secret 이 왜 하나도 안 잡히는지 알려줘"               → source=matches (완화 사다리)
 "collect 테이블 body가 null 이 아닌 데이터에 대해 패턴 추출해줘"  → source=collect
 "수집된 트래픽 본문에서 정규식 후보 찾아줘"                     → source=collect
+"collect 테이블 content 컬럼에서 sectionId 찾는 패턴 만들어줘"   → column=content, json_key=sectionId
 ```
 
 ---
@@ -192,7 +217,7 @@ ReDoS 없음·커버리지만 본다.
 "직접 둘러보면서 트래픽 모아줘"
 ```
 
-이후 `run_scan`을 부르면 모아 둔 트래픽을 대상으로 탐지한다. 사람 개입이 필요 없다.
+이후 `detect_matches`을 부르면 모아 둔 트래픽을 대상으로 탐지한다. 사람 개입이 필요 없다.
 
 ---
 
@@ -204,8 +229,8 @@ ReDoS 없음·커버리지만 본다.
 
 **로그인 세션은 저장하지 않는다.** 구현했다가 제거했다 — `storage_state()`가 컨텍스트의
 모든 쿠키를 내보내 점검 대상과 무관한 메일·금융 세션까지 평문 파일 하나에 모이기 때문이다.
-그래서 로그인해야 보이는 페이지는 `collect_traffic` 중에만 관찰되고 `run_scan` 재현 시에는
+그래서 로그인해야 보이는 페이지는 `collect_traffic` 중에만 관찰되고 `detect_matches` 재현 시에는
 비로그인 상태로 접근한다.
 
-**`[MATCH]` 줄은 매칭된 값을 그대로 출력한다** ([verification.md](verification.md) 6-6).
+**`[MATCH]` 줄은 매칭된 값을 그대로 출력한다** ([verification.md](verification.md) 6-5).
 표준출력으로 나가므로 파이프·리다이렉트 시 값이 파일에 남는다.
