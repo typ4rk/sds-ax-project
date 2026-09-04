@@ -10,6 +10,13 @@ import sys
 
 from dotenv import load_dotenv
 
+from src import _usage
+
+# 도구 호출 루프의 상한. 한 라운드가 모델+도구 2단계이므로 도구 호출 약 12회까지 허용한다.
+# langgraph 기본값은 10007이라 사실상 무제한이며, 루프가 꼬이면 Bedrock 토큰 쿼터를
+# 통째로 태운다. 도구가 4개뿐이라 정상 요청은 2~3회면 끝난다.
+RECURSION_LIMIT = 25
+
 
 def main(argv: list[str]) -> int:
     """CLI 인자를 해석해 1회 실행 또는 REPL 모드로 에이전트를 돌린다."""
@@ -43,8 +50,17 @@ def _print_answer(agent, request: str) -> int:
 
 
 def _ask(agent, request: str) -> str:
-    """자연어 요청 1개를 에이전트에 넘기고 최종 응답 텍스트를 돌려준다."""
-    result = agent.invoke({"messages": [{"role": "user", "content": request}]})
+    """자연어 요청 1개를 에이전트에 넘기고 최종 응답 텍스트를 돌려준다.
+
+    토큰 사용량은 표준에러에 한 줄로 남긴다. 표준출력은 [MATCH] 줄과
+    최종 응답의 몫이므로 섞지 않는다.
+    """
+    tracer = _usage.UsageTracer()
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": request}]},
+        {"recursion_limit": RECURSION_LIMIT, "callbacks": [tracer]},
+    )
+    tracer.report()
     return _text_of(result["messages"][-1])
 
 

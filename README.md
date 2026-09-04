@@ -172,7 +172,7 @@ suggest_patterns(column="content", json_key="sectionId")
 **이 도구를 부르는 요청**
 
 ```
-"test-any-url 패턴이 너무 넓게 잡히는데 더 좁은 정규식 없어?"   → source=matches
+"origin-body 패턴이 너무 넓게 잡히는데 더 좁은 정규식 없어?"   → source=matches
 "custom-secret 이 왜 하나도 안 잡히는지 알려줘"               → source=matches (완화 사다리)
 "collect 테이블 body가 null 이 아닌 데이터에 대해 패턴 추출해줘"  → source=collect
 "수집된 트래픽 본문에서 정규식 후보 찾아줘"                     → source=collect

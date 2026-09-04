@@ -9,6 +9,8 @@ import os
 from langchain.agents import create_agent
 from langchain_aws import ChatBedrockConverse
 
+from src._masking import MaskMatchedValues
+
 SYSTEM_PROMPT = (
     "당신은 브라우저 패턴 탐지 도구의 실행 결과를 사람이 이해하기 쉽게 "
     "요약해 설명하는 보조자입니다. 수집·탐지·저장 로직은 도구 내부에서 고정된 순서로 "
@@ -48,6 +50,8 @@ def build_agent():
         model=model,
         tools=[detect_matches, query_matches, suggest_patterns, collect_traffic],
         system_prompt=SYSTEM_PROMPT,
+        # 탐지한 값을 외부 모델에 평문으로 보내지 않는다 (형식만 남기고 치환).
+        middleware=[MaskMatchedValues()],
     )
 
 

@@ -1,11 +1,11 @@
 {
   "patterns": [
-    { "name": "jwt-token", "regex": "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+" },
-    { "name": "custom-secret", "regex": "sk_live_[A-Za-z0-9]{24,}" },
-    { "name": "personal-code", "regex": "\\d{6}-[1-4]\\d{6}"},
-    { "name": "personal-tel", "regex": "010-\\d{3,4}-\\d{4}"},
-    { "name": "credit-card", "regex": "\\d{4}-\\d{4}-\\d{4}-\\d{4}"},
-    { "name": "origin-body", "regex": "(?mi)(\"origin\")"}
+    { "name": "jwt-token", "regex": "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "masking": true },
+    { "name": "custom-secret", "regex": "sk_live_[A-Za-z0-9]{24,}", "masking": true },
+    { "name": "personal-code", "regex": "\\d{6}-[1-4]\\d{6}", "masking": true},
+    { "name": "personal-tel", "regex": "010-\\d{3,4}-\\d{4}", "masking": true},
+    { "name": "credit-card", "regex": "\\d{4}-\\d{4}-\\d{4}-\\d{4}", "masking": true},
+    { "name": "origin-body", "regex": "(?mi)(\"origin\")", "masking": false}
   ],
   "targets": {
     "network": { "headers": true, "body": true, "requestBody": true, "cookies": true },
