@@ -9,6 +9,7 @@ import os
 from langchain.agents import create_agent
 from langchain_aws import ChatBedrockConverse
 
+from src._guards import ToolResultGuard
 from src._masking import MaskMatchedValues
 
 SYSTEM_PROMPT = (
@@ -50,8 +51,10 @@ def build_agent():
         model=model,
         tools=[detect_matches, query_matches, suggest_patterns, collect_traffic],
         system_prompt=SYSTEM_PROMPT,
-        # 탐지한 값을 외부 모델에 평문으로 보내지 않는다 (형식만 남기고 치환).
-        middleware=[MaskMatchedValues()],
+        # 차단(탐지) -> 정제(마스킹) 순서.
+        # ToolResultGuard: 수집한 트래픽에 심긴 지시문을 찾아 알린다 (결과는 안 바꾼다).
+        # MaskMatchedValues: 탐지한 값을 외부 모델에 평문으로 보내지 않는다.
+        middleware=[ToolResultGuard(), MaskMatchedValues()],
     )
 
 

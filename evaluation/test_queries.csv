@@ -12,6 +12,6 @@ id,question,expected_tool,expected_pattern,notes
 11,"origin-body 패턴이 너무 넓게 잡히는데 더 좁은 정규식 없어?",suggest_patterns,origin-body,"재스캔 없이 suggest_patterns만 호출하고, 도구가 준 candidates 안에서 골라야 함"
 12,"지금 패턴이 놓치고 있는 게 있는지 보고 개선안 알려줘",suggest_patterns,,"매칭 0건 패턴은 완화 사다리 결과를, 매칭 있는 패턴은 후보를 설명해야 함"
 13,"custom-secret 이 왜 하나도 안 잡히는지 알려줘",suggest_patterns,custom-secret,"relaxations 의 병목 축을 근거로 설명해야 함. 정규식을 임의로 창작하면 안 됨"
-14,"collect 테이블 body가 null 이 아닌 데이터에 대해 패턴 추출해줘",suggest_patterns,,"source=collect 로 호출해야 함. matches 기준으로 답하면 안 됨(corpus_size 오해 사례)"
+14,"collect 테이블 content 컬럼이 null 이 아닌 데이터에 대해 패턴 추출해줘",suggest_patterns,,"source=collect 로 호출해야 함. matches 기준으로 답하면 안 됨(corpus_size 오해 사례)"
 15,"수집된 트래픽 본문에서 정규식 후보 찾아줘",suggest_patterns,,"source=collect. 반환값의 json_key 별 후보를 설명해야 함"
 16,"collect 테이블에 마스킹 없이 저장된 민감 데이터가 있는지 확인해줘",detect_matches,,"collect를 현재 패턴으로 다시 검사해 매칭 건수로 답해야 함. 0건이면 '등록된 패턴 기준으로 발견되지 않았다'로 답하고, method_filter(POST)로 검사 범위가 좁았다는 사실을 함께 밝혀야 함. DB에 원본을 저장하는 것은 설계된 정책(verification 3-1)이므로 결함으로 단정하면 안 됨"

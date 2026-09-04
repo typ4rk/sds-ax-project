@@ -13,6 +13,8 @@ import threading
 from typing import Callable
 
 TRACE_ENV = "SCAN_TRACE"
+# 패턴 귀납 진단은 따로 켠다. 수집 원본 덤프(수천 행)와 보고 싶은 시점이 다르다.
+INDUCE_TRACE_ENV = "INDUCE_TRACE"
 PREVIEW_CHARS = 300
 # [MATCH] 줄에 싣는 detail의 최대 길이 (verification.md 6-2)
 DETAIL_CHARS = 200
@@ -100,6 +102,37 @@ def _clip(value, limit: int) -> str:
 def trace_enabled() -> bool:
     """수집 데이터 추적 출력이 켜져 있는지 알려준다 (환경변수 SCAN_TRACE)."""
     return os.environ.get(TRACE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def notify_guard(tool_name: str, matched: str, pattern: str) -> None:
+    """도구 결과에서 발견한 주입 의심 문자열을 표준에러로 알린다.
+
+    수집한 트래픽에 지시문이 심겨 있었다는 사실 자체가 이 도구가 보고할
+    발견이므로 환경변수로 끄지 않고 항상 낸다. 결과 자체는 바꾸지 않으므로,
+    이 줄은 '모델이 그 문자열을 보았다'는 경고이기도 하다.
+    """
+    print(
+        f"[GUARD] {tool_name} 결과에 주입 의심 문자열: {_clip(matched, 120)!r}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def induce_trace_enabled() -> bool:
+    """패턴 귀납 진단 출력이 켜져 있는지 알려준다 (환경변수 INDUCE_TRACE)."""
+    return os.environ.get(INDUCE_TRACE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def notify_induce(message: str, depth: int = 0) -> None:
+    """패턴 귀납의 중간 단계를 표준에러로 알린다.
+
+    후보 탈락 사유(lost/redos/compiles)는 반환값에 실리지 않고 개수만 남는다.
+    "왜 이 후보가 안 나왔나"를 답하려면 그 사유가 보여야 한다.
+    표본 값이 함께 실릴 수 있어 기본은 꺼져 있고 INDUCE_TRACE=1일 때만 나간다.
+    """
+    if not induce_trace_enabled():
+        return
+    print(f"[INDUCE] {'  ' * depth}{_one_line(message)}", file=sys.stderr, flush=True)
 
 
 def notify_collected(

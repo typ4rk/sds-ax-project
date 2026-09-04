@@ -270,14 +270,26 @@ def _suggest_from_collect(
 
     candidates = []
     skipped_keys = []
+    rejected = 0
+    _notify.notify_induce(
+        f"source=collect column={target} 행 {len(rows)}개 키 {len(buckets)}종")
     for key, values in sorted(buckets.items()):
         if len(values) < min_cluster:
             skipped_keys.append(key)
+            _notify.notify_induce(
+                f"key={key} 건너뜀 (서로 다른 값 {len(values)}개 < {min_cluster})", depth=1)
             continue
+        _notify.notify_induce(f"key={key} 값 {len(values)}개", depth=1)
         for cand in _induce.induce_regex(values, min_cluster=min_cluster):
             score = _induce.evaluate_candidate(cand["regex"], values)
             if not score["compiles"] or score["redos_risk"]:
+                rejected += 1
+                _notify.notify_induce(
+                    f"{cand['variant']:8} 탈락: {_reject_reason(score)}"
+                    f"  regex={cand['regex']}", depth=2)
                 continue
+            _notify.notify_induce(
+                f"{cand['variant']:8} 채택: coverage {score['coverage']}", depth=2)
             candidates.append(
                 {
                     "json_key": key,
@@ -290,6 +302,8 @@ def _suggest_from_collect(
                 }
             )
     candidates.sort(key=lambda c: (-c["support"], c["tightness"], len(c["regex"])))
+    _notify.notify_induce(
+        f"채택 {len(candidates)} / 탈락 {rejected} / 키 건너뜀 {len(skipped_keys)}", depth=1)
 
     return {
         "source": "collect",
@@ -396,6 +410,8 @@ def _suggest_from_matches(
             pattern_name=name, scan_id=scan_id, limit=limit
         )
         values = [row["matched_value"] for row in rows]
+        _notify.notify_induce(
+            f"pattern={name} 값 {len(values)}개 corpus={len(corpus)}")
         others = [rx for other, rx in patterns if other != name]
         entry = {
             "pattern_name": name,
@@ -465,6 +481,7 @@ def _build_candidates(
     accepted: list[dict] = []
     rejected = 0
     for signature, members in _induce.cluster_by_shape(values).items():
+        _notify.notify_induce(f"cluster sig={signature} 멤버 {len(members)}개", depth=1)
         for cand in _induce.induce_regex(members, min_cluster=min_cluster):
             negatives = _induce.synthetic_negatives(cand["prefix"], cand["suffix"])
             score = _induce.evaluate_candidate(
@@ -472,7 +489,13 @@ def _build_candidates(
             )
             if not score["compiles"] or score["lost"] or score["redos_risk"]:
                 rejected += 1
+                _notify.notify_induce(
+                    f"{cand['variant']:8} 탈락: {_reject_reason(score)}"
+                    f"  regex={cand['regex']}", depth=2)
                 continue
+            _notify.notify_induce(
+                f"{cand['variant']:8} 채택: gained {len(score['gained'])},"
+                f" 음성차단 {score['negative_block_rate']}", depth=2)
             accepted.append(
                 {
                     "variant": cand["variant"],
@@ -494,7 +517,21 @@ def _build_candidates(
             len(c["regex"]),
         )
     )
+    _notify.notify_induce(
+        f"채택 {len(accepted)} / 탈락 {rejected}"
+        f" / 잘림 {max(0, len(accepted) - MAX_CANDIDATES)}", depth=1)
     return accepted[:MAX_CANDIDATES], rejected
+
+
+def _reject_reason(score: dict) -> str:
+    """후보가 채택 게이트에서 탈락한 사유를 한 줄로 만든다."""
+    if not score.get("compiles", True):
+        return "컴파일 실패"
+    # collect 경로에는 기준 정규식이 없어 lost 판정 자체가 없다.
+    lost = score.get("lost") or []
+    if lost:
+        return f"기존 패턴이 잡던 값 {len(lost)}건을 놓침"
+    return "중첩 수량자 (ReDoS 위험)"
 
 
 def _build_relaxations(baseline: str, corpus: list[str]) -> list[dict]:

@@ -11,9 +11,10 @@ report.md에서 바로 짚을 수 있게 한다.
 한 문항이 터져도 나머지를 계속 돌린다. 15문항 중 3번째에서 죽으면 나머지 12문항의
 상태를 영영 모르기 때문이다.
 
-출력은 두 가지다.
+출력은 세 가지다.
   - 표준출력: report.md 1절에 그대로 붙일 수 있는 마크다운 표
   - evaluation/eval_result.json: 답변 전문까지 담은 원본 기록
+  - evaluation/eval_trace.jsonl: 호출 단위 기록 (지연 시간, 토큰, 도구 결과 크기)
 """
 
 import csv
@@ -28,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 QUERIES_PATH = ROOT / "evaluation" / "test_queries.csv"
 RESULT_PATH = ROOT / "evaluation" / "eval_result.json"
+TRACE_PATH = ROOT / "evaluation" / "eval_trace.jsonl"
 REQUIRED_COLUMNS = ("id", "question", "expected_tool")
 
 PASS, FAIL, ERROR = "PASS", "FAIL", "ERROR"
@@ -68,7 +70,10 @@ def run_one(agent, case: dict) -> dict:
         )
         answer = main._text_of(result["messages"][-1])
     except Exception as exc:  # 한 문항의 실패가 전체를 멈추면 안 된다
+        tracer.dump(TRACE_PATH, case_id=str(case.get("id", "")).strip())
         return _record(case, ERROR, [], "", tracer, f"{type(exc).__name__}: {exc}")
+
+    tracer.dump(TRACE_PATH, case_id=str(case.get("id", "")).strip())
 
     called = []
     for name, _chars in tracer.tools:
@@ -175,6 +180,9 @@ def main(argv: list[str]) -> int:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
+    # dump는 이어쓰기라 회차가 섞인다. 이번 실행분만 남기려면 먼저 지운다.
+    TRACE_PATH.unlink(missing_ok=True)
+
     results = []
     for case in cases:
         print(f"[{case['id']}] {case['question'][:48]}", file=sys.stderr, flush=True)
@@ -190,7 +198,7 @@ def main(argv: list[str]) -> int:
     print(f"결과: {stats['passed']}/{stats['total']} 통과", file=sys.stderr)
     for tool, bucket in stats["by_tool"].items():
         print(f"  {tool:18} {bucket['passed']}/{bucket['total']}", file=sys.stderr)
-    print(f"기록: {RESULT_PATH}", file=sys.stderr)
+    print(f"기록: {RESULT_PATH}, {TRACE_PATH}", file=sys.stderr)
     return 0
 
 
