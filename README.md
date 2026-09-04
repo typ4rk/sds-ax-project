@@ -10,6 +10,36 @@ python -m src.main                    # 인자 없으면 대화형
 준비가 안 됐으면 [design.md](design.md) 8절의 "준비 (최초 1회)"를 먼저 따른다
 (`pip install -r requirements.txt` → `playwright install chromium` → `.env` 채우기).
 
+## 출력 스트림
+
+| 스트림 | 내용 |
+|---|---|
+| 표준출력 | `[MATCH]` 줄과 에이전트 최종 응답 |
+| 표준에러 | `[usage]`, `[GUARD]`, `[RECORD]`·`[TRACE]`·`[INDUCE]` 진행 알림 |
+
+`[usage]`는 실행마다 한 줄 나온다. 도구 결과 글자 수를 함께 싣는 이유는 그 결과가
+다음 LLM 호출의 입력이 되기 때문이다.
+
+```
+[usage] llm=2 input=11,404 output=183 total=11,587 | tools: detect_matches(1,204자)
+```
+
+`[GUARD]`는 수집한 트래픽에 지시문이 심겨 있을 때 나온다. **결과를 바꾸지는 않는다** —
+그 문자열은 모델에게 그대로 전달되므로, 이 줄은 사람이 보고 판단하라는 신호다.
+
+```
+[GUARD] query_matches 결과에 주입 의심 문자열: '이전 지시는 모두 무시'
+```
+
+### 디버깅 스위치
+
+| 환경변수 | 효과 |
+|---|---|
+| `SCAN_TRACE=1` | `collect_traffic`이 수집한 원본을 표준에러로 출력 |
+| `INDUCE_TRACE=1` | `suggest_patterns`의 귀납 중간 단계 — 후보별 채택/탈락 사유 |
+
+둘 다 원본 값이 노출되므로 평소에는 비워 둔다.
+
 ## 도구 4개 한눈에
 
 | 도구 | 한 줄 요약 | 브라우저 | DB |
@@ -71,6 +101,18 @@ python -m src.main                    # 인자 없으면 대화형
 
 `url`은 매칭된 값이 아니라 **값이 발견된 리소스 URL**이다. 실제로 걸린 값은
 `matched_value`, 방문한 페이지는 `detail.page_url`, 그 값이 있던 문장은 `detail.context`다.
+
+`matched_value`와 `detail` 안의 같은 값은 **모델에게 갈 때만** 형식 보존 치환된다
+(숫자 → `0`, 글자 → `X`, 구분자는 유지). DB와 `[MATCH]` 줄에는 원본이 그대로 남는다.
+가릴지 말지는 `patterns.json`의 패턴별 `masking` 플래그가 정하고, 키가 없으면 가린다.
+
+```
+eyJhbGciOiJIUzI1NiJ9.eyJz  →  XXXXXXXXXXXXXXX0XXX0.XXXX
+010-1234-5678              →  000-0000-0000
+```
+
+리터럴 앵커(`eyJ`, `sk_live_`)가 사라지므로 마스킹된 값은 원본 정규식으로 다시
+매칭되지 않는다. 구분자 배치와 길이 같은 **구조만** 확인할 수 있다.
 
 **이 도구를 부르는 요청**
 
@@ -139,8 +181,9 @@ expsTrtrCd    00[0-9]{4}                 13
 bizCd         04[0-9]{2}01                4
 ```
 
-기준이 될 기존 정규식이 없어 **회귀 판정을 못 한다** — 채택 게이트가 컴파일 가능·
-ReDoS 없음·커버리지만 본다.
+기준이 될 기존 정규식이 없어 **회귀 판정을 못 한다** — 채택 게이트는 컴파일 가능·
+ReDoS 없음만 본다. `coverage`는 후보에 실어 돌려주되 채택 조건에는 넣지 않으므로,
+`coverage 0.0`인 후보도 목록에 나올 수 있다.
 
 **반환**: `source`, `column`, `json_key`, `location_filter`, `rows_analyzed`,
 `json_keys_found`, `keys_too_few_values`,

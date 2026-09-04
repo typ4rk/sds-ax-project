@@ -70,10 +70,29 @@ def load_masking_policy() -> dict:
     return policy
 
 
+def _mask_detail(row: dict, raw: str, masked: str) -> None:
+    """행의 부가정보에 박힌 같은 값을 함께 가린다.
+
+    retriever._to_dict 가 detail_json 을 파싱해 detail(dict) 로 바꿔 돌려주므로
+    실제로 오는 것은 dict 다. _matcher 가 매칭된 값을 context 에 문맥째로 담기
+    때문에, matched_value 만 가리면 같은 값이 context 로 그대로 새어 나간다.
+    """
+    detail = row.get("detail")
+    if isinstance(detail, dict):
+        for key, value in detail.items():
+            if isinstance(value, str) and raw in value:
+                detail[key] = value.replace(raw, masked)
+
+    # 파싱 전 형태로 오는 경로가 생겨도 새지 않도록 함께 본다.
+    legacy = row.get("detail_json")
+    if isinstance(legacy, str) and raw in legacy:
+        row["detail_json"] = legacy.replace(raw, masked)
+
+
 class MaskMatchedValues(AgentMiddleware):
     """도구 결과에 실린 매칭 값을 모델에게 넘기기 전에 가린다.
 
-    가리는 것은 matched_value와 detail_json 안에 박힌 같은 값뿐이다.
+    가리는 것은 matched_value와 detail 안에 박힌 같은 값뿐이다.
     url, location, pattern_name, matched_at은 모델이 요약에 쓰는 차원이라 남긴다.
     """
 
@@ -114,10 +133,7 @@ class MaskMatchedValues(AgentMiddleware):
                 continue
             masked = mask_value(raw)
             row["matched_value"] = masked
-            detail = row.get("detail_json")
-            if isinstance(detail, str) and raw in detail:
-                # 문맥에도 값이 박혀 있다 (_matcher가 context로 함께 저장한다).
-                row["detail_json"] = detail.replace(raw, masked)
+            _mask_detail(row, raw, masked)
             changed = True
 
         if changed:

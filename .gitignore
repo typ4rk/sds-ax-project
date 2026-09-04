@@ -13,6 +13,10 @@ data/scan.db-journal
 data/scan.db-wal
 data/scan.db-shm
 
+# 평가 실행 산출물 (실행할 때마다 바뀐다. 예시는 evaluation/README.md 에 남긴다)
+evaluation/eval_result.json
+evaluation/eval_trace.jsonl
+
 # 에디터/OS
 .vscode/
 .idea/

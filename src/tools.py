@@ -252,7 +252,8 @@ def _suggest_from_collect(
     min_cluster 미만인 키는 과적합하므로 건너뛴다.
 
     matches 경로와 달리 기준이 될 기존 정규식이 없어 회귀(lost) 판정을 할 수 없다.
-    그래서 채택 게이트는 컴파일 가능·ReDoS 없음·커버리지만 본다.
+    그래서 채택 게이트는 컴파일 가능·ReDoS 없음만 본다. coverage는 후보에 실어
+    돌려주되 채택 조건에는 넣지 않으므로 coverage 0.0인 후보도 남는다.
     """
     target = column or "content"
     # 컬럼을 지목하지 않은 요청만 요청 본문으로 좁힌다 (기존 동작 유지).
